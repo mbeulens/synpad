@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.9.6"
+APP_VERSION = "1.9.7"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -3186,20 +3186,7 @@ class SynPadWindow(Gtk.Window):
         for tab in self.tabs.values():
             if tab.remote_path == old_path:
                 tab.remote_path = new_path
-                # Update the tab label
-                page_widget = tab.source_view.get_parent()
-                tab_widget = self.notebook.get_tab_label(page_widget)
-                if tab_widget:
-                    # tab_widget is the EventBox > Box > Label
-                    ebox = tab_widget
-                    tab_box = ebox.get_child()
-                    for child in tab_box.get_children():
-                        if isinstance(child, Gtk.Label):
-                            if tab.modified:
-                                child.set_markup(f"<b>* {new_name}</b>")
-                            else:
-                                child.set_text(new_name)
-                            break
+                self._update_tab_label(tab, new_name)
                 break
 
         self._set_status(f"Renamed to {new_path}")
@@ -3494,12 +3481,21 @@ class SynPadWindow(Gtk.Window):
 
     # -- Open Local File ------------------------------------------------------
 
-    _untitled_counter = 0
-
     def _on_new_local_file(self):
         """Create a new untitled tab. File location chosen on first save."""
-        SynPadWindow._untitled_counter += 1
-        name = f"Untitled {self._untitled_counter}"
+        # Find lowest available untitled number
+        used = set()
+        for tab in self.tabs.values():
+            if tab.remote_path.startswith('Untitled '):
+                try:
+                    num = int(tab.remote_path.split(' ', 1)[1])
+                    used.add(num)
+                except ValueError:
+                    pass
+        n = 1
+        while n in used:
+            n += 1
+        name = f"Untitled {n}"
         self._create_editor_tab(name, '', '', is_local=True)
         self.item_save.set_sensitive(True)
 
@@ -3528,9 +3524,16 @@ class SynPadWindow(Gtk.Window):
             filt_code.add_pattern(f"*.{ext}")
         dlg.add_filter(filt_code)
 
+        # Remember last folder
+        last_dir = self.config.get('last_save_dir', '')
+        if last_dir and os.path.isdir(last_dir):
+            dlg.set_current_folder(last_dir)
+
         resp = dlg.run()
         if resp == Gtk.ResponseType.OK:
             filepath = dlg.get_filename()
+            self.config['last_save_dir'] = os.path.dirname(filepath)
+            save_config(self.config)
             dlg.destroy()
             self._open_local_file(filepath)
         else:
@@ -3555,6 +3558,34 @@ class SynPadWindow(Gtk.Window):
         self.item_save.set_sensitive(True)
 
     # -- Save (local or remote) -----------------------------------------------
+
+    def _update_tab_label(self, tab, new_name):
+        """Update the tab label text for a given tab."""
+        page_widget = tab.source_view.get_parent()  # ScrolledWindow
+        tab_widget = self.notebook.get_tab_label(page_widget)  # EventBox
+        if not tab_widget:
+            return
+        # Walk: EventBox -> Box -> find Label
+        def _find_label(widget):
+            if isinstance(widget, Gtk.Label):
+                return widget
+            if hasattr(widget, 'get_children'):
+                for child in widget.get_children():
+                    found = _find_label(child)
+                    if found:
+                        return found
+            if hasattr(widget, 'get_child'):
+                child = widget.get_child()
+                if child:
+                    return _find_label(child)
+            return None
+
+        label = _find_label(tab_widget)
+        if label:
+            if tab.modified:
+                label.set_markup(f"<b>* {new_name}</b>")
+            else:
+                label.set_text(new_name)
 
     def _on_save(self, _btn):
         """Save the current file — locally or via upload depending on type."""
@@ -3583,22 +3614,22 @@ class SynPadWindow(Gtk.Window):
             )
             dlg.set_do_overwrite_confirmation(True)
             dlg.set_current_name(tab.remote_path)  # "Untitled 1" etc.
+            # Remember last save folder
+            last_dir = self.config.get('last_save_dir', '')
+            if last_dir and os.path.isdir(last_dir):
+                dlg.set_current_folder(last_dir)
 
             resp = dlg.run()
             if resp == Gtk.ResponseType.OK:
                 filepath = dlg.get_filename()
+                # Save the folder for next time
+                self.config['last_save_dir'] = os.path.dirname(filepath)
+                save_config(self.config)
                 dlg.destroy()
                 tab.local_path = filepath
                 tab.remote_path = filepath
-                # Update tab label
-                page_widget = tab.source_view.get_parent()
-                tab_widget = self.notebook.get_tab_label(page_widget)
-                if tab_widget:
-                    tab_box = tab_widget.get_child()
-                    for child in tab_box.get_children():
-                        if isinstance(child, Gtk.Label):
-                            child.set_text(os.path.basename(filepath))
-                            break
+                # Update tab label — walk EventBox > Box > children
+                self._update_tab_label(tab, os.path.basename(filepath))
             else:
                 dlg.destroy()
                 return
