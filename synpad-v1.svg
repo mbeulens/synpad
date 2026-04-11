@@ -1,26 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <defs>
-    <!-- Notepad gradient: white top to green bottom -->
-    <linearGradient id="notepadGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#ffffff"/>
-      <stop offset="100%" stop-color="#73d216"/>
-    </linearGradient>
-    <!-- Header gradient -->
-    <linearGradient id="headerGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#e8e8e0"/>
-      <stop offset="100%" stop-color="#8ae234"/>
-    </linearGradient>
-  </defs>
-
   <!-- Shadow -->
   <rect x="18" y="14" width="88" height="108" rx="6" fill="#1a1a1a" opacity="0.2"/>
 
-  <!-- Notepad body with gradient -->
-  <rect x="16" y="10" width="88" height="108" rx="6" fill="url(#notepadGrad)"/>
+  <!-- Notepad body -->
+  <rect x="16" y="10" width="88" height="108" rx="6" fill="#f5f5f0"/>
 
   <!-- Notepad header bar -->
-  <rect x="16" y="10" width="88" height="18" rx="6" fill="url(#headerGrad)"/>
-  <rect x="16" y="22" width="88" height="6" fill="url(#headerGrad)"/>
+  <rect x="16" y="10" width="88" height="18" rx="6" fill="#e0e0d8"/>
+  <rect x="16" y="22" width="88" height="6" fill="#e0e0d8"/>
 
   <!-- Notepad rings -->
   <circle cx="32" cy="18" r="4" fill="#c0c0b8" stroke="#a0a098" stroke-width="1"/>
@@ -29,14 +16,14 @@
   <circle cx="80" cy="18" r="4" fill="#c0c0b8" stroke="#a0a098" stroke-width="1"/>
 
   <!-- Code lines on notepad -->
-  <rect x="26" y="38" width="42" height="3" rx="1.5" fill="#2e6203" opacity="0.5"/>
-  <rect x="26" y="47" width="58" height="3" rx="1.5" fill="#3465a4" opacity="0.5"/>
-  <rect x="26" y="56" width="35" height="3" rx="1.5" fill="#204a87" opacity="0.5"/>
+  <rect x="26" y="38" width="42" height="3" rx="1.5" fill="#4e9a06" opacity="0.6"/>
+  <rect x="26" y="47" width="58" height="3" rx="1.5" fill="#555753" opacity="0.4"/>
+  <rect x="26" y="56" width="35" height="3" rx="1.5" fill="#3465a4" opacity="0.5"/>
   <rect x="26" y="65" width="52" height="3" rx="1.5" fill="#555753" opacity="0.4"/>
-  <rect x="26" y="74" width="28" height="3" rx="1.5" fill="#5c3566" opacity="0.5"/>
-  <rect x="26" y="83" width="48" height="3" rx="1.5" fill="#2e3436" opacity="0.35"/>
-  <rect x="26" y="92" width="38" height="3" rx="1.5" fill="#204a87" opacity="0.4"/>
-  <rect x="26" y="101" width="55" height="3" rx="1.5" fill="#2e3436" opacity="0.3"/>
+  <rect x="26" y="74" width="28" height="3" rx="1.5" fill="#75507b" opacity="0.5"/>
+  <rect x="26" y="83" width="48" height="3" rx="1.5" fill="#555753" opacity="0.4"/>
+  <rect x="26" y="92" width="38" height="3" rx="1.5" fill="#c4a000" opacity="0.5"/>
+  <rect x="26" y="101" width="55" height="3" rx="1.5" fill="#555753" opacity="0.4"/>
 
   <!-- Pencil shadow -->
   <g transform="translate(3, 3)" opacity="0.15">
@@ -48,14 +35,14 @@
 
   <!-- Pencil -->
   <g transform="translate(62, 8) rotate(35, 30, 55)">
-    <!-- Pencil body — yellow -->
-    <rect x="24" y="10" width="12" height="70" rx="2" fill="#fce94f"/>
+    <!-- Pencil body -->
+    <rect x="24" y="10" width="12" height="70" rx="2" fill="#4e9a06"/>
 
     <!-- Pencil highlight -->
-    <rect x="24" y="10" width="5" height="70" rx="2" fill="#ffff80" opacity="0.5"/>
+    <rect x="24" y="10" width="5" height="70" rx="2" fill="#73d216" opacity="0.5"/>
 
     <!-- Pencil dark side -->
-    <rect x="33" y="10" width="3" height="70" rx="1" fill="#c4a000" opacity="0.4"/>
+    <rect x="33" y="10" width="3" height="70" rx="1" fill="#2e6203" opacity="0.4"/>
 
     <!-- Metal band -->
     <rect x="22" y="72" width="16" height="10" rx="1" fill="#c0a030"/>
