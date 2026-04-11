@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.11.1"
 DEBUG_MODE = False
 
 import gi
@@ -486,6 +486,17 @@ class ConnectDialog(Gtk.Dialog):
         self.key_box_widget = key_box
         row += 1
 
+        # Group
+        grid.attach(Gtk.Label(label="Group:", halign=Gtk.Align.END), 0, row, 1, 1)
+        self.group_entry = Gtk.Entry(
+            hexpand=True,
+            text=config.get('server_group', ''),
+            placeholder_text="(optional, e.g. Production)",
+        )
+        self.group_entry.set_activates_default(True)
+        grid.attach(self.group_entry, 1, row, 1, 1)
+        row += 1
+
         # Home directory
         grid.attach(Gtk.Label(label="Home dir:", halign=Gtk.Align.END), 0, row, 1, 1)
         self.home_entry = Gtk.Entry(
@@ -548,6 +559,7 @@ class ConnectDialog(Gtk.Dialog):
             self.user_entry.set_text(srv.get('username', ''))
             self.pass_entry.set_text(srv.get('password', ''))
             self.key_entry.set_text(srv.get('ssh_key_path', ''))
+            self.group_entry.set_text(srv.get('group', ''))
             self.home_entry.set_text(srv.get('home_directory', ''))
             self.size_entry.set_value(srv.get('max_upload_size_mb', 5))
             self.remember_check.set_active(True)
@@ -603,6 +615,7 @@ class ConnectDialog(Gtk.Dialog):
         profile = {
             'guid': existing_guid or str(uuid.uuid4()),
             'name': name,
+            'group': self.group_entry.get_text().strip(),
             'protocol': self.proto_combo.get_active_id(),
             'host': self.host_entry.get_text().strip(),
             'port': int(self.port_entry.get_value()),
@@ -762,6 +775,7 @@ class ConnectDialog(Gtk.Dialog):
             'username': self.user_entry.get_text().strip(),
             'password': self.pass_entry.get_text(),
             'ssh_key_path': self.key_entry.get_text().strip(),
+            'group': self.group_entry.get_text().strip(),
             'home_directory': self.home_entry.get_text().strip(),
             'max_upload_size_mb': int(self.size_entry.get_value()),
             'remember': self.remember_check.get_active(),
@@ -1528,10 +1542,11 @@ class SynPadWindow(Gtk.Window):
         server_row.set_margin_end(4)
         server_row.set_margin_bottom(2)
 
-        self.quick_combo = Gtk.ComboBoxText()
-        self.quick_combo.set_tooltip_text("Quick connect to saved server")
-        self._rebuild_quick_combo()
-        server_row.pack_start(self.quick_combo, True, True, 0)
+        self.quick_btn = Gtk.MenuButton(label="Quick Connect")
+        self.quick_btn.set_tooltip_text("Quick connect to saved server")
+        self.quick_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self._rebuild_quick_menu()
+        server_row.pack_start(self.quick_btn, True, True, 0)
 
         self.files_pane.pack_start(server_row, False, False, 0)
         self.files_pane.pack_start(self.scroll_tree, True, True, 0)
@@ -1865,7 +1880,7 @@ class SynPadWindow(Gtk.Window):
                 self.config['last_server'] = vals.get('server_guid', '')
                 save_config(self.config)
         # Always rebuild quick connect — renames/saves/deletes may have happened
-        self._rebuild_quick_combo()
+        self._rebuild_quick_menu()
         dlg.destroy()
 
     def _on_toggle_theme(self, _btn):
@@ -2432,37 +2447,66 @@ class SynPadWindow(Gtk.Window):
         b = int(rgba.blue * 255)
         return f'#{r:02x}{g:02x}{b:02x}'
 
-    def _rebuild_quick_combo(self):
-        """Refresh the quick-connect dropdown from config."""
-        self.quick_combo.remove_all()
+    def _rebuild_quick_menu(self):
+        """Rebuild the quick-connect menu with grouped submenus."""
         servers = self.config.get('servers', [])
         if not servers:
-            self.quick_combo.set_visible(False)
+            self.quick_btn.set_visible(False)
             return
-        self.quick_combo.set_visible(True)
-        self.quick_combo.append('__none__', 'Quick Connect...')
-        for srv in servers:
-            label = f"{srv['name']} ({srv.get('protocol','sftp').upper()})"
-            self.quick_combo.append(srv['guid'], label)
-        self.quick_combo.set_active_id('__none__')
+        self.quick_btn.set_visible(True)
 
-    def _on_quick_connect(self, combo):
-        """Instantly connect to a saved server from the toolbar dropdown."""
-        server_id = combo.get_active_id()
-        if server_id == '__none__' or server_id is None:
-            return
+        menu = Gtk.Menu()
+
+        # Group servers
+        groups = {}  # group_name -> [srv, ...]
+        ungrouped = []
+        for srv in servers:
+            group = srv.get('group', '').strip()
+            if group:
+                groups.setdefault(group, []).append(srv)
+            else:
+                ungrouped.append(srv)
+
+        # Add ungrouped servers first
+        for srv in ungrouped:
+            label = f"{srv['name']} ({srv.get('protocol','sftp').upper()})"
+            item = Gtk.MenuItem(label=label)
+            guid = srv['guid']
+            item.connect('activate', lambda _i, g=guid: self._on_quick_connect(g))
+            menu.append(item)
+
+        # Add separator if both ungrouped and grouped exist
+        if ungrouped and groups:
+            menu.append(Gtk.SeparatorMenuItem())
+
+        # Add grouped servers as submenus
+        for group_name in sorted(groups.keys()):
+            group_item = Gtk.MenuItem(label=group_name)
+            submenu = Gtk.Menu()
+            for srv in groups[group_name]:
+                label = f"{srv['name']} ({srv.get('protocol','sftp').upper()})"
+                item = Gtk.MenuItem(label=label)
+                guid = srv['guid']
+                item.connect('activate', lambda _i, g=guid: self._on_quick_connect(g))
+                submenu.append(item)
+            group_item.set_submenu(submenu)
+            menu.append(group_item)
+
+        menu.show_all()
+        self.quick_btn.set_popup(menu)
+
+    def _on_quick_connect(self, server_guid):
+        """Instantly connect to a saved server."""
         # Disconnect first if connected
         if self.ftp_mgr and self.ftp_mgr.connected:
             self._on_disconnect(None)
-        srv = find_server_by_guid(self.config, server_id)
+        srv = find_server_by_guid(self.config, server_guid)
         if srv:
             vals = dict(srv)
             vals['remember'] = True
             vals['server_guid'] = srv['guid']
             vals['server_name'] = srv['name']
             self._do_connect(vals)
-        # Reset combo to placeholder
-        combo.set_active_id('__none__')
 
     def _connect_signals(self):
         self.connect('destroy', self._on_quit)
@@ -2471,7 +2515,7 @@ class SynPadWindow(Gtk.Window):
         self.btn_disconnect.connect('clicked', self._on_disconnect)
         # btn_save removed — menu item handles save
         self.btn_refresh.connect('clicked', self._on_refresh)
-        self.quick_combo.connect('changed', self._on_quick_connect)
+        # quick_btn uses menu items with their own signals
         self.btn_theme.connect('clicked', self._on_toggle_theme)
         self.btn_console.connect('clicked', self._on_toggle_console)
         self.tree_view.connect('row-activated', self._on_tree_row_activated)
@@ -2578,11 +2622,11 @@ class SynPadWindow(Gtk.Window):
         if resp == Gtk.ResponseType.OK:
             vals = dlg.get_values()
             dlg.destroy()
-            self._rebuild_quick_combo()
+            self._rebuild_quick_menu()
             self._do_connect(vals)
         else:
             dlg.destroy()
-            self._rebuild_quick_combo()
+            self._rebuild_quick_menu()
 
     def _do_connect(self, vals):
         protocol = vals.get('protocol', 'sftp')
@@ -2650,7 +2694,7 @@ class SynPadWindow(Gtk.Window):
             self.header.set_subtitle(f"[{server_name}] {proto_label}: {vals['username']}@{vals['host']}")
         else:
             self.header.set_subtitle(f"{proto_label}: {vals['username']}@{vals['host']}")
-        self._rebuild_quick_combo()
+        self._rebuild_quick_menu()
         self.btn_connect.set_sensitive(False)
         self.btn_disconnect.set_sensitive(True)
         self.item_save.set_sensitive(True)
