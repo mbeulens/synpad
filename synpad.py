@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.9"
+APP_VERSION = "1.11.10"
 DEBUG_MODE = False
 
 import gi
@@ -3893,6 +3893,7 @@ class SynPadWindow(Gtk.Window):
                 remote_content = None
                 if file_changed or (tab.remote_mtime is None and tab.remote_hash) or no_stats:
                     # Download remote file to temp for hash and compare
+                    self._console_log(f"COMPARE GET {tab.remote_path}")
                     remote_tmp = tab.local_path + '.remote_tmp'
                     try:
                         mgr.download(tab.remote_path, remote_tmp)
@@ -3900,9 +3901,11 @@ class SynPadWindow(Gtk.Window):
                             remote_bytes = f.read()
                         current_hash = hashlib.sha256(remote_bytes).hexdigest()
                         remote_content = remote_bytes.decode('utf-8', errors='replace')
-                    except Exception:
+                        self._console_log(f"COMPARE remote hash: {current_hash[:16]}...")
+                    except Exception as e:
                         current_hash = None
                         remote_content = None
+                        self._console_log(f"COMPARE GET failed: {e}", 'error')
                     finally:
                         try:
                             os.unlink(remote_tmp)
@@ -3910,23 +3913,31 @@ class SynPadWindow(Gtk.Window):
                             pass
 
                     if current_hash and tab.remote_hash and current_hash != tab.remote_hash:
-                        self._debug(f"Server hash changed: {tab.remote_hash[:12]}... -> {current_hash[:12]}...")
+                        self._console_log(
+                            f"COMPARE CHANGED — stored: {tab.remote_hash[:16]}... "
+                            f"server: {current_hash[:16]}...", 'error')
                         file_changed = True
                     elif current_hash and tab.remote_hash and current_hash == tab.remote_hash:
-                        self._debug("Mtime changed but hash is identical — safe to upload")
+                        self._console_log(f"COMPARE OK — hashes match", 'success')
                         file_changed = False
                     elif current_hash and no_stats:
                         # Session-restored tab: compare remote hash with local content hash
                         with open(tab.local_path, 'rb') as f:
                             local_hash = hashlib.sha256(f.read()).hexdigest()
+                        self._console_log(
+                            f"COMPARE session tab — local: {local_hash[:16]}... "
+                            f"server: {current_hash[:16]}...")
                         if current_hash != local_hash:
-                            self._debug(f"Session tab: remote differs from local: {current_hash[:12]}... vs {local_hash[:12]}...")
+                            self._console_log(
+                                f"COMPARE CHANGED — files differ", 'error')
                             file_changed = True
                         else:
-                            self._debug("Session tab: remote matches local — safe to upload")
+                            self._console_log(f"COMPARE OK — files match", 'success')
                             file_changed = False
                         # Store the hash now for future checks
                         tab.remote_hash = local_hash
+                else:
+                    self._console_log(f"COMPARE skipped — mtime unchanged")
 
                 if file_changed:
                     import queue
