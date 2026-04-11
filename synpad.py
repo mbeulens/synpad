@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.4"
+APP_VERSION = "1.10.5"
 DEBUG_MODE = False
 
 import gi
@@ -4310,7 +4310,7 @@ class SynPadWindow(Gtk.Window):
             dlg.destroy()
 
     def _show_diff(self, tab_a, tab_b):
-        """Show a diff window comparing two tabs."""
+        """Show a side-by-side diff window comparing two tabs."""
         import difflib
 
         buf_a = tab_a.buffer
@@ -4321,57 +4321,218 @@ class SynPadWindow(Gtk.Window):
         name_a = os.path.basename(tab_a.remote_path)
         name_b = os.path.basename(tab_b.remote_path)
 
-        lines_a = text_a.splitlines(keepends=True)
-        lines_b = text_b.splitlines(keepends=True)
+        lines_a = text_a.splitlines()
+        lines_b = text_b.splitlines()
 
-        diff = list(difflib.unified_diff(lines_a, lines_b,
-                                         fromfile=name_a, tofile=name_b,
-                                         lineterm=''))
-
-        if not diff:
+        if lines_a == lines_b:
             self._show_info("Compare", f"'{name_a}' and '{name_b}' are identical.")
             return
 
-        # Show diff in a new window
+        # Build side-by-side lines with opcodes
+        sm = difflib.SequenceMatcher(None, lines_a, lines_b)
+        opcodes = sm.get_opcodes()
+
+        # Each entry: (left_text, right_text, tag)
+        # tag: 'equal', 'replace', 'delete', 'insert'
+        diff_rows = []
+        change_positions = []  # line indices where changes occur
+
+        for op, i1, i2, j1, j2 in opcodes:
+            if op == 'equal':
+                for i, j in zip(range(i1, i2), range(j1, j2)):
+                    diff_rows.append((lines_a[i], lines_b[j], 'equal'))
+            elif op == 'replace':
+                max_len = max(i2 - i1, j2 - j1)
+                for k in range(max_len):
+                    left = lines_a[i1 + k] if (i1 + k) < i2 else ''
+                    right = lines_b[j1 + k] if (j1 + k) < j2 else ''
+                    change_positions.append(len(diff_rows))
+                    diff_rows.append((left, right, 'replace'))
+            elif op == 'delete':
+                for i in range(i1, i2):
+                    change_positions.append(len(diff_rows))
+                    diff_rows.append((lines_a[i], '', 'delete'))
+            elif op == 'insert':
+                for j in range(j1, j2):
+                    change_positions.append(len(diff_rows))
+                    diff_rows.append(('', lines_b[j], 'insert'))
+
+        total_lines = len(diff_rows)
+
+        # --- Build window ---
         win = Gtk.Window(
             title=f"Diff: {name_a} vs {name_b}",
             transient_for=self,
             destroy_with_parent=True,
         )
-        win.set_default_size(800, 600)
+        win.set_default_size(1000, 700)
 
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
 
-        text_buf = Gtk.TextBuffer()
+        # Left + Right panes in a horizontal box with synced scrolling
+        content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
 
-        # Create tags for diff coloring
-        text_buf.create_tag('header', foreground='#3465a4', weight=700)
-        text_buf.create_tag('hunk', foreground='#75507b')
-        text_buf.create_tag('added', foreground='#4e9a06', background='#e8fce8')
-        text_buf.create_tag('removed', foreground='#cc0000', background='#fce8e8')
-        text_buf.create_tag('context', foreground='#555753')
+        # Shared vertical adjustment for synced scrolling
+        vadj = Gtk.Adjustment()
 
-        for line in diff:
-            end = text_buf.get_end_iter()
-            if line.startswith('---') or line.startswith('+++'):
-                text_buf.insert_with_tags_by_name(end, line + '\n', 'header')
-            elif line.startswith('@@'):
-                text_buf.insert_with_tags_by_name(end, line + '\n', 'hunk')
-            elif line.startswith('+'):
-                text_buf.insert_with_tags_by_name(end, line + '\n', 'added')
-            elif line.startswith('-'):
-                text_buf.insert_with_tags_by_name(end, line + '\n', 'removed')
+        # --- Left pane ---
+        left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        left_header = Gtk.Label()
+        left_header.set_markup(f"<b>{name_a}</b>")
+        left_header.set_margin_start(6)
+        left_header.set_margin_top(4)
+        left_header.set_margin_bottom(4)
+        left_header.set_halign(Gtk.Align.START)
+        left_box.pack_start(left_header, False, False, 0)
+
+        left_scroll = Gtk.ScrolledWindow()
+        left_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.EXTERNAL)
+        left_scroll.set_vadjustment(vadj)
+
+        left_buf = Gtk.TextBuffer()
+        left_buf.create_tag('equal', background=None)
+        left_buf.create_tag('replace', background='#fff3c0')
+        left_buf.create_tag('delete', background='#fce8e8')
+        left_buf.create_tag('insert', background='#f0f0f0', foreground='#aaaaaa')
+        left_buf.create_tag('linenum', foreground='#888888')
+
+        left_view = Gtk.TextView(buffer=left_buf)
+        left_view.set_editable(False)
+        left_view.set_cursor_visible(False)
+        left_view.set_monospace(True)
+        left_scroll.add(left_view)
+        left_box.pack_start(left_scroll, True, True, 0)
+
+        # --- Right pane ---
+        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        right_header = Gtk.Label()
+        right_header.set_markup(f"<b>{name_b}</b>")
+        right_header.set_margin_start(6)
+        right_header.set_margin_top(4)
+        right_header.set_margin_bottom(4)
+        right_header.set_halign(Gtk.Align.START)
+        right_box.pack_start(right_header, False, False, 0)
+
+        right_scroll = Gtk.ScrolledWindow()
+        right_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.EXTERNAL)
+        right_scroll.set_vadjustment(vadj)
+
+        right_buf = Gtk.TextBuffer()
+        right_buf.create_tag('equal', background=None)
+        right_buf.create_tag('replace', background='#fff3c0')
+        right_buf.create_tag('insert', background='#e8fce8')
+        right_buf.create_tag('delete', background='#f0f0f0', foreground='#aaaaaa')
+        right_buf.create_tag('linenum', foreground='#888888')
+
+        right_view = Gtk.TextView(buffer=right_buf)
+        right_view.set_editable(False)
+        right_view.set_cursor_visible(False)
+        right_view.set_monospace(True)
+        right_scroll.add(right_view)
+        right_box.pack_start(right_scroll, True, True, 0)
+
+        # Separator between panes
+        content_box.pack_start(left_box, True, True, 0)
+        content_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL),
+                               False, False, 0)
+        content_box.pack_start(right_box, True, True, 0)
+
+        # --- Fill buffers ---
+        left_line_num = 0
+        right_line_num = 0
+        for left_text, right_text, tag in diff_rows:
+            # Left side
+            end_l = left_buf.get_end_iter()
+            if tag == 'insert':
+                left_buf.insert_with_tags_by_name(end_l, '\n', tag)
             else:
-                text_buf.insert_with_tags_by_name(end, line + '\n', 'context')
+                left_line_num += 1
+                left_buf.insert_with_tags_by_name(end_l, f"{left_text}\n", tag)
 
-        text_view = Gtk.TextView(buffer=text_buf)
-        text_view.set_editable(False)
-        text_view.set_cursor_visible(False)
-        text_view.set_monospace(True)
+            # Right side
+            end_r = right_buf.get_end_iter()
+            if tag == 'delete':
+                right_buf.insert_with_tags_by_name(end_r, '\n', tag)
+            else:
+                right_line_num += 1
+                right_buf.insert_with_tags_by_name(end_r, f"{right_text}\n", tag)
 
-        scroll.add(text_view)
-        win.add(scroll)
+        # --- Change minimap (right edge) ---
+        minimap = Gtk.DrawingArea()
+        minimap.set_size_request(24, -1)
+
+        def on_draw_minimap(widget, cr):
+            alloc = widget.get_allocation()
+            w = alloc.width
+            h = alloc.height
+            if total_lines == 0:
+                return
+            # Background
+            cr.set_source_rgb(0.92, 0.92, 0.92)
+            cr.rectangle(0, 0, w, h)
+            cr.fill()
+            # Draw change marks
+            for pos in change_positions:
+                y = int((pos / total_lines) * h)
+                tag = diff_rows[pos][2]
+                if tag == 'replace':
+                    cr.set_source_rgb(0.9, 0.75, 0.0)  # yellow
+                elif tag == 'delete':
+                    cr.set_source_rgb(0.85, 0.2, 0.2)  # red
+                elif tag == 'insert':
+                    cr.set_source_rgb(0.2, 0.65, 0.2)  # green
+                cr.rectangle(2, y, w - 4, max(2, h / total_lines))
+                cr.fill()
+            # Viewport indicator
+            if vadj.get_upper() > 0:
+                vp_start = vadj.get_value() / vadj.get_upper() * h
+                vp_height = vadj.get_page_size() / vadj.get_upper() * h
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.15)
+                cr.rectangle(0, vp_start, w, vp_height)
+                cr.fill()
+
+        minimap.connect('draw', on_draw_minimap)
+
+        # Redraw minimap when scrolling
+        def on_scroll_changed(*_args):
+            minimap.queue_draw()
+        vadj.connect('value-changed', on_scroll_changed)
+
+        # Click on minimap to scroll
+        def on_minimap_click(widget, event):
+            alloc = widget.get_allocation()
+            if alloc.height > 0 and total_lines > 0:
+                fraction = event.y / alloc.height
+                target = fraction * vadj.get_upper()
+                vadj.set_value(max(0, target - vadj.get_page_size() / 2))
+            return True
+
+        minimap.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        minimap.connect('button-press-event', on_minimap_click)
+
+        # Shared vertical scrollbar
+        vscroll = Gtk.Scrollbar(orientation=Gtk.Orientation.VERTICAL, adjustment=vadj)
+
+        main_box.pack_start(content_box, True, True, 0)
+        main_box.pack_start(minimap, False, False, 0)
+        main_box.pack_start(vscroll, False, False, 0)
+
+        # Status bar with change count
+        status = Gtk.Label()
+        changes = len(change_positions)
+        status.set_markup(f"  <b>{changes}</b> change(s) found")
+        status.set_halign(Gtk.Align.START)
+        status.set_margin_start(8)
+        status.set_margin_top(4)
+        status.set_margin_bottom(4)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.pack_start(main_box, True, True, 0)
+        outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
+                         False, False, 0)
+        outer.pack_start(status, False, False, 0)
+
+        win.add(outer)
         win.show_all()
 
     def _on_goto_line(self):
