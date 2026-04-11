@@ -4,6 +4,22 @@ All notable changes to SynPad are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.12.0] - 2026-04-12
+
+### Added
+- Server groups — group server profiles and quick connect shows submenus
+- Profile name as a form field — no more separate rename dialog
+- SHA256 hash verification before every upload — prevents overwriting server changes
+- Conflict dialog with 4 options: Overwrite, Use Remote, Compare, Cancel
+- Conflict compare view — side-by-side diff of local changes vs server version with action buttons
+- Remote file stats (mtime, hash) saved in session for restored tabs
+- All conflict check actions logged to console (COMPARE GET, hash, OK/CHANGED)
+
+### Fixed
+- Server Manager opens with clean form instead of last used server
+- Form fields clear when selecting "(New connection)"
+- Session-restored tabs now check for server changes before first upload
+
 ## [1.11.0] - 2026-04-12
 
 ### Added

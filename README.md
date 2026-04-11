@@ -19,7 +19,9 @@ A lightweight PHP/JS IDE with FTP/SFTP integration for Linux, built with Python 
 ### Remote File Management
 - **FTP & SFTP** connection with SSH key auth (RSA, Ed25519, ECDSA)
 - **Server profiles** with save, rename, delete, and quick connect
+- **Server groups** — organize profiles into groups with submenu quick connect
 - **Smart save** — auto-switches server connection when saving a file from a different server
+- **Conflict detection** — SHA256 hash check before every upload, warns if server file changed
 - **File tree** auto-navigates to the correct directory after server switch
 - **File operations** — create, rename, delete files and directories, chmod permissions
 - **GUID-based** server references — rename profiles without breaking anything
