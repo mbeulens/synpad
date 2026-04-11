@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.8"
+APP_VERSION = "1.11.9"
 DEBUG_MODE = False
 
 import gi
@@ -1923,6 +1923,8 @@ class SynPadWindow(Gtk.Window):
                 'modified': tab.modified,
                 'content': content,
                 'server_guid': tab.server_guid,
+                'remote_hash': tab.remote_hash,
+                'remote_mtime': tab.remote_mtime,
             })
 
         session = {
@@ -1986,11 +1988,13 @@ class SynPadWindow(Gtk.Window):
             self._create_editor_tab(remote_path, local_path, content,
                                     is_local=is_local, server_guid=server_guid)
 
-            # Mark as modified if it was unsaved
-            if was_modified:
-                page_num = self.notebook.get_n_pages() - 1
-                tab = self.tabs.get(page_num)
-                if tab:
+            # Restore remote stats and mark as modified if needed
+            page_num = self.notebook.get_n_pages() - 1
+            tab = self.tabs.get(page_num)
+            if tab:
+                tab.remote_hash = tab_data.get('remote_hash')
+                tab.remote_mtime = tab_data.get('remote_mtime')
+                if was_modified:
                     tab.buffer.set_modified(True)
 
         # Restore active tab
@@ -3873,6 +3877,9 @@ class SynPadWindow(Gtk.Window):
         def work():
             try:
                 # Check if file was modified on server since we opened it
+                # Session-restored tabs have no stats — always check those
+                no_stats = (tab.remote_mtime is None and tab.remote_hash is None)
+
                 # Step 1: fast mtime check
                 file_changed = False
                 if tab.remote_mtime is not None:
@@ -3881,10 +3888,10 @@ class SynPadWindow(Gtk.Window):
                         self._debug(f"Server mtime changed: {tab.remote_mtime} -> {current_mtime}")
                         file_changed = True
 
-                # Step 2: definitive hash check (if mtime changed or unavailable)
-                # Download remote content for hash + potential compare
+                # Step 2: definitive hash check
+                # Runs when: mtime changed, mtime unavailable but hash exists, or no stats at all
                 remote_content = None
-                if file_changed or (tab.remote_mtime is None and tab.remote_hash):
+                if file_changed or (tab.remote_mtime is None and tab.remote_hash) or no_stats:
                     # Download remote file to temp for hash and compare
                     remote_tmp = tab.local_path + '.remote_tmp'
                     try:
@@ -3908,6 +3915,18 @@ class SynPadWindow(Gtk.Window):
                     elif current_hash and tab.remote_hash and current_hash == tab.remote_hash:
                         self._debug("Mtime changed but hash is identical — safe to upload")
                         file_changed = False
+                    elif current_hash and no_stats:
+                        # Session-restored tab: compare remote hash with local content hash
+                        with open(tab.local_path, 'rb') as f:
+                            local_hash = hashlib.sha256(f.read()).hexdigest()
+                        if current_hash != local_hash:
+                            self._debug(f"Session tab: remote differs from local: {current_hash[:12]}... vs {local_hash[:12]}...")
+                            file_changed = True
+                        else:
+                            self._debug("Session tab: remote matches local — safe to upload")
+                            file_changed = False
+                        # Store the hash now for future checks
+                        tab.remote_hash = local_hash
 
                 if file_changed:
                     import queue
