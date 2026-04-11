@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.8.6"
+APP_VERSION = "1.8.7"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import tempfile
+import uuid
 import threading
 from pathlib import Path
 
@@ -41,7 +42,7 @@ DEFAULT_CONFIG = {
     'ssh_key_path': '',        # optional path to private key
     'home_directory': '',      # starting directory on connect (blank = /)
     'servers': [],             # saved server profiles
-    'last_server': '',         # name of last used server
+    'last_server': '',         # GUID of last used server
     'pane_order': ['symbols', 'editor', 'files'],  # left to right
     'dark_theme': True,        # editor color scheme
     'color_scheme': 'oblivion', # GtkSourceView style scheme id
@@ -59,8 +60,24 @@ def load_config():
         # Merge with defaults for any missing keys
         for k, v in DEFAULT_CONFIG.items():
             cfg.setdefault(k, v)
+        # Migrate: add GUIDs to any server profiles that don't have one
+        migrated = False
+        for srv in cfg.get('servers', []):
+            if 'guid' not in srv:
+                srv['guid'] = str(uuid.uuid4())
+                migrated = True
+        if migrated:
+            save_config(cfg)
         return cfg
     return dict(DEFAULT_CONFIG)
+
+
+def find_server_by_guid(cfg, guid):
+    """Find a server profile by its GUID. Returns the dict or None."""
+    for srv in cfg.get('servers', []):
+        if srv.get('guid') == guid:
+            return srv
+    return None
 
 
 def save_config(cfg):
@@ -382,13 +399,18 @@ class ConnectDialog(Gtk.Dialog):
         self.server_combo = Gtk.ComboBoxText()
         self.server_combo.append('__new__', '(New connection)')
         for srv in config.get('servers', []):
-            self.server_combo.append(srv['name'], srv['name'])
+            self.server_combo.append(srv['guid'], srv['name'])
         server_box.pack_start(self.server_combo, True, True, 0)
 
         self.btn_save_server = Gtk.Button(label="Save")
         self.btn_save_server.set_tooltip_text("Save current settings as a server profile")
         self.btn_save_server.connect('clicked', self._on_save_server)
         server_box.pack_start(self.btn_save_server, False, False, 0)
+
+        self.btn_rename_server = Gtk.Button(label="Rename")
+        self.btn_rename_server.set_tooltip_text("Rename selected server profile")
+        self.btn_rename_server.connect('clicked', self._on_rename_server)
+        server_box.pack_start(self.btn_rename_server, False, False, 0)
 
         self.btn_delete_server = Gtk.Button(label="Delete")
         self.btn_delete_server.set_tooltip_text("Delete selected server profile")
@@ -516,21 +538,20 @@ class ConnectDialog(Gtk.Dialog):
         self._update_delete_btn()
         if server_id == '__new__' or server_id is None:
             return
-        for srv in self.config.get('servers', []):
-            if srv['name'] == server_id:
-                self._loading_server = True
-                self.proto_combo.set_active_id(srv.get('protocol', 'sftp'))
-                self.host_entry.set_text(srv.get('host', ''))
-                self.port_entry.set_value(srv.get('port', 22))
-                self.user_entry.set_text(srv.get('username', ''))
-                self.pass_entry.set_text(srv.get('password', ''))
-                self.key_entry.set_text(srv.get('ssh_key_path', ''))
-                self.home_entry.set_text(srv.get('home_directory', ''))
-                self.size_entry.set_value(srv.get('max_upload_size_mb', 5))
-                self.remember_check.set_active(True)
-                self._update_sftp_fields()
-                self._loading_server = False
-                break
+        srv = find_server_by_guid(self.config, server_id)
+        if srv:
+            self._loading_server = True
+            self.proto_combo.set_active_id(srv.get('protocol', 'sftp'))
+            self.host_entry.set_text(srv.get('host', ''))
+            self.port_entry.set_value(srv.get('port', 22))
+            self.user_entry.set_text(srv.get('username', ''))
+            self.pass_entry.set_text(srv.get('password', ''))
+            self.key_entry.set_text(srv.get('ssh_key_path', ''))
+            self.home_entry.set_text(srv.get('home_directory', ''))
+            self.size_entry.set_value(srv.get('max_upload_size_mb', 5))
+            self.remember_check.set_active(True)
+            self._update_sftp_fields()
+            self._loading_server = False
 
     def _on_save_server(self, _btn):
         """Save current fields as a named server profile."""
@@ -538,7 +559,9 @@ class ConnectDialog(Gtk.Dialog):
         # Suggest the current server name or host as default
         default_name = ''
         if current_id and current_id != '__new__':
-            default_name = current_id
+            srv = find_server_by_guid(self.config, current_id)
+            if srv:
+                default_name = srv['name']
         elif self.host_entry.get_text().strip():
             default_name = self.host_entry.get_text().strip()
 
@@ -571,7 +594,13 @@ class ConnectDialog(Gtk.Dialog):
         if resp != Gtk.ResponseType.OK or not name:
             return
 
+        # If editing an existing server, update it; otherwise create new
+        existing_guid = None
+        if current_id and current_id != '__new__':
+            existing_guid = current_id
+
         profile = {
+            'guid': existing_guid or str(uuid.uuid4()),
             'name': name,
             'protocol': self.proto_combo.get_active_id(),
             'host': self.host_entry.get_text().strip(),
@@ -584,20 +613,20 @@ class ConnectDialog(Gtk.Dialog):
         }
 
         servers = self.config.get('servers', [])
-        # Update existing or add new
-        found = False
-        for i, srv in enumerate(servers):
-            if srv['name'] == name:
-                servers[i] = profile
-                found = True
-                break
-        if not found:
+        if existing_guid:
+            for i, srv in enumerate(servers):
+                if srv.get('guid') == existing_guid:
+                    servers[i] = profile
+                    break
+            # Rebuild combo to update the display name
+            self._rebuild_server_combo()
+        else:
             servers.append(profile)
-            self.server_combo.append(name, name)
+            self.server_combo.append(profile['guid'], name)
 
         self.config['servers'] = servers
         save_config(self.config)
-        self.server_combo.set_active_id(name)
+        self.server_combo.set_active_id(profile['guid'])
 
     def _on_delete_server(self, _btn):
         """Delete the currently selected server profile."""
@@ -605,13 +634,16 @@ class ConnectDialog(Gtk.Dialog):
         if server_id == '__new__' or server_id is None:
             return
 
+        srv = find_server_by_guid(self.config, server_id)
+        display_name = srv['name'] if srv else server_id
+
         dlg = Gtk.MessageDialog(
             transient_for=self, modal=True,
             message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.YES_NO,
             text="Delete Server",
         )
-        dlg.format_secondary_text(f"Delete server profile '{server_id}'?")
+        dlg.format_secondary_text(f"Delete server profile '{display_name}'?")
         resp = dlg.run()
         dlg.destroy()
 
@@ -619,20 +651,67 @@ class ConnectDialog(Gtk.Dialog):
             return
 
         servers = self.config.get('servers', [])
-        self.config['servers'] = [s for s in servers if s['name'] != server_id]
+        self.config['servers'] = [s for s in servers if s.get('guid') != server_id]
         save_config(self.config)
+        self._rebuild_server_combo()
+        self.server_combo.set_active_id('__new__')
 
-        # Rebuild combo
+    def _on_rename_server(self, _btn):
+        """Rename the currently selected server profile."""
+        server_id = self.server_combo.get_active_id()
+        if server_id == '__new__' or server_id is None:
+            return
+
+        srv = find_server_by_guid(self.config, server_id)
+        if not srv:
+            return
+
+        dlg = Gtk.Dialog(
+            title="Rename Server",
+            transient_for=self,
+            modal=True,
+        )
+        dlg.add_buttons(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_OK, Gtk.ResponseType.OK,
+        )
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        content = dlg.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+        content.set_margin_top(12)
+        content.set_margin_bottom(12)
+        content.add(Gtk.Label(label="New name:", halign=Gtk.Align.START))
+        name_entry = Gtk.Entry(text=srv['name'])
+        name_entry.set_activates_default(True)
+        content.add(name_entry)
+        dlg.show_all()
+
+        resp = dlg.run()
+        new_name = name_entry.get_text().strip()
+        dlg.destroy()
+
+        if resp != Gtk.ResponseType.OK or not new_name:
+            return
+
+        srv['name'] = new_name
+        save_config(self.config)
+        self._rebuild_server_combo()
+        self.server_combo.set_active_id(server_id)
+
+    def _rebuild_server_combo(self):
+        """Rebuild the server dropdown from config."""
         self.server_combo.remove_all()
         self.server_combo.append('__new__', '(New connection)')
-        for srv in self.config['servers']:
-            self.server_combo.append(srv['name'], srv['name'])
-        self.server_combo.set_active_id('__new__')
+        for srv in self.config.get('servers', []):
+            self.server_combo.append(srv['guid'], srv['name'])
 
     def _update_delete_btn(self):
         server_id = self.server_combo.get_active_id()
-        self.btn_delete_server.set_sensitive(
-            server_id is not None and server_id != '__new__'
+        is_saved = server_id is not None and server_id != '__new__'
+        self.btn_delete_server.set_sensitive(is_saved)
+        self.btn_rename_server.set_sensitive(is_saved
         )
 
     def _on_protocol_changed(self, combo):
@@ -671,8 +750,11 @@ class ConnectDialog(Gtk.Dialog):
 
     def get_values(self):
         server_id = self.server_combo.get_active_id()
+        server_guid = server_id if server_id != '__new__' else ''
+        srv = find_server_by_guid(self.config, server_guid) if server_guid else None
         return {
-            'server_name': server_id if server_id != '__new__' else '',
+            'server_name': srv['name'] if srv else '',
+            'server_guid': server_guid,
             'protocol': self.proto_combo.get_active_id(),
             'host': self.host_entry.get_text().strip(),
             'port': int(self.port_entry.get_value()),
@@ -1218,6 +1300,7 @@ class SynPadWindow(Gtk.Window):
         self.set_default_size(1200, 750)
         self.config = load_config()
         self.ftp_mgr = None  # set on connect (FTPManager or SFTPManager)
+        self.current_server_guid = ''  # GUID of currently connected server
         self.tabs = {}  # page_num -> OpenTab
         self.current_remote_dir = '/'
         self.tmp_dir = tempfile.mkdtemp(prefix='synpad_')
@@ -1765,7 +1848,7 @@ class SynPadWindow(Gtk.Window):
                 self.config['protocol'] = vals.get('protocol', 'sftp')
                 self.config['ssh_key_path'] = vals.get('ssh_key_path', '')
                 self.config['home_directory'] = vals.get('home_directory', '')
-                self.config['last_server'] = vals.get('server_name', '')
+                self.config['last_server'] = vals.get('server_guid', '')
                 save_config(self.config)
                 self._rebuild_quick_combo()
         dlg.destroy()
@@ -2326,7 +2409,7 @@ class SynPadWindow(Gtk.Window):
         self.quick_combo.append('__none__', 'Quick Connect...')
         for srv in servers:
             label = f"{srv['name']} ({srv.get('protocol','sftp').upper()})"
-            self.quick_combo.append(srv['name'], label)
+            self.quick_combo.append(srv['guid'], label)
         self.quick_combo.set_active_id('__none__')
 
     def _on_quick_connect(self, combo):
@@ -2337,13 +2420,13 @@ class SynPadWindow(Gtk.Window):
         # Disconnect first if connected
         if self.ftp_mgr and self.ftp_mgr.connected:
             self._on_disconnect(None)
-        for srv in self.config.get('servers', []):
-            if srv['name'] == server_id:
-                vals = dict(srv)
-                vals['remember'] = True
-                vals['server_name'] = srv['name']
-                self._do_connect(vals)
-                break
+        srv = find_server_by_guid(self.config, server_id)
+        if srv:
+            vals = dict(srv)
+            vals['remember'] = True
+            vals['server_guid'] = srv['guid']
+            vals['server_name'] = srv['name']
+            self._do_connect(vals)
         # Reset combo to placeholder
         combo.set_active_id('__none__')
 
@@ -2493,6 +2576,27 @@ class SynPadWindow(Gtk.Window):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_connected(self, vals):
+        # Auto-save server profile if connecting without one
+        server_guid = vals.get('server_guid', '')
+        if not server_guid:
+            server_guid = str(uuid.uuid4())
+            profile = {
+                'guid': server_guid,
+                'name': vals.get('host', 'Unknown'),
+                'protocol': vals.get('protocol', 'sftp'),
+                'host': vals['host'],
+                'port': vals['port'],
+                'username': vals['username'],
+                'password': vals['password'],
+                'ssh_key_path': vals.get('ssh_key_path', ''),
+                'home_directory': vals.get('home_directory', ''),
+                'max_upload_size_mb': vals['max_upload_size_mb'],
+            }
+            self.config.setdefault('servers', []).append(profile)
+            vals['server_guid'] = server_guid
+            vals['server_name'] = profile['name']
+
+        self.current_server_guid = server_guid
         self.config['host'] = vals['host']
         self.config['port'] = vals['port']
         self.config['username'] = vals['username']
@@ -2501,9 +2605,8 @@ class SynPadWindow(Gtk.Window):
         self.config['protocol'] = vals.get('protocol', 'sftp')
         self.config['ssh_key_path'] = vals.get('ssh_key_path', '')
         self.config['home_directory'] = vals.get('home_directory', '')
-        self.config['last_server'] = vals.get('server_name', '')
-        if vals.get('remember'):
-            save_config(self.config)
+        self.config['last_server'] = server_guid
+        save_config(self.config)
 
         proto_label = vals.get('protocol', 'sftp').upper()
         server_name = vals.get('server_name', '')
@@ -2535,6 +2638,7 @@ class SynPadWindow(Gtk.Window):
             self._console_log("DISCONNECT")
             self.ftp_mgr.disconnect()
             self.ftp_mgr = None
+        self.current_server_guid = ''
         self.tree_store.clear()
         self.header.set_subtitle("Disconnected")
         self.btn_connect.set_sensitive(True)
