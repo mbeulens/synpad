@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.8.3"
+APP_VERSION = "1.8.4"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -1828,6 +1828,11 @@ class SynPadWindow(Gtk.Window):
             # Insert timestamp before the message we just added
             start = self._console_buffer.get_start_iter()
             self._console_buffer.insert_with_tags_by_name(start, f"[{ts}] ", 'timestamp')
+            # Trim to 500 lines
+            if self._console_buffer.get_line_count() > 500:
+                trim_start = self._console_buffer.get_iter_at_line(500)
+                trim_end = self._console_buffer.get_end_iter()
+                self._console_buffer.delete(trim_start, trim_end)
             return False
 
         GLib.idle_add(_do_log)
