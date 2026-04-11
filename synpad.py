@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.9.8"
+APP_VERSION = "1.9.9"
+DEBUG_MODE = False
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -1390,6 +1391,11 @@ class SynPadWindow(Gtk.Window):
         item_settings.connect('activate', self._on_open_settings)
         menu.append(item_settings)
 
+        self._debug_menu_item = Gtk.CheckMenuItem(label="Debug Mode")
+        self._debug_menu_item.set_active(DEBUG_MODE)
+        self._debug_menu_item.connect('toggled', self._on_toggle_debug)
+        menu.append(self._debug_menu_item)
+
         menu.append(Gtk.SeparatorMenuItem())
 
         item_quit = Gtk.MenuItem(label="Quit  Ctrl+Q")
@@ -1986,6 +1992,17 @@ class SynPadWindow(Gtk.Window):
 
     # -- Console ---------------------------------------------------------------
 
+    def _on_toggle_debug(self, item):
+        global DEBUG_MODE
+        DEBUG_MODE = item.get_active()
+        if DEBUG_MODE:
+            self._console_log("Debug mode ON", 'success')
+            # Auto-show console
+            if not self._console_visible:
+                self._on_toggle_console()
+        else:
+            self._console_log("Debug mode OFF")
+
     def _on_toggle_console(self, *_args):
         """Toggle the console pane visibility."""
         self._console_visible = not self._console_visible
@@ -2002,6 +2019,12 @@ class SynPadWindow(Gtk.Window):
     def _on_clear_console(self, *_args):
         """Clear the console output."""
         self._console_buffer.set_text('')
+
+    def _debug(self, message):
+        """Log a debug message to the console if debug mode is on."""
+        global DEBUG_MODE
+        if DEBUG_MODE:
+            self._console_log(f"[DEBUG] {message}", 'timestamp')
 
     def _console_log(self, message, tag=None):
         """Insert a timestamped message at the top of the console. Thread-safe via idle_add."""
@@ -3360,9 +3383,14 @@ class SynPadWindow(Gtk.Window):
 
         buf.connect('modified-changed', on_modified_changed)
 
-        # Close button
+        # Close button — find the current page_num dynamically, not from closure
         def on_close(_btn):
-            self._close_tab(page_num)
+            # Find the actual page number for this tab's scroll widget
+            scroll_widget = tab.source_view.get_parent()
+            current_page = self.notebook.page_num(scroll_widget)
+            self._debug(f"Close X clicked: tab={os.path.basename(tab.remote_path)}, page_num={current_page}")
+            if current_page >= 0:
+                self._close_tab(current_page)
 
         close_btn.connect('clicked', on_close)
 
@@ -3386,6 +3414,7 @@ class SynPadWindow(Gtk.Window):
 
     def _close_tab(self, page_num):
         tab = self.tabs.get(page_num)
+        self._debug(f"_close_tab: page_num={page_num}, tab={'found: ' + os.path.basename(tab.remote_path) if tab else 'NOT FOUND'}, tabs={list(self.tabs.keys())}")
         if not tab:
             return
         if tab.modified:
@@ -3418,11 +3447,12 @@ class SynPadWindow(Gtk.Window):
         new_tabs = {}
         for i in range(self.notebook.get_n_pages()):
             widget = self.notebook.get_nth_page(i)
-            for old_num, tab in self.tabs.items():
+            for old_num, tab in list(self.tabs.items()):
                 scroll = tab.source_view.get_parent()
                 if scroll is widget:
                     new_tabs[i] = tab
                     break
+        self._debug(f"_reindex_tabs: {list(self.tabs.keys())} -> {list(new_tabs.keys())}")
         self.tabs = new_tabs
 
     # -- Tab Context Menu -----------------------------------------------------
