@@ -4,6 +4,34 @@ All notable changes to SynPad are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.11.0] - 2026-04-12
+
+### Added
+- Side-by-side file compare (Menu > Compare Tabs)
+  - Color-coded: yellow=changed, red=deleted, green=added
+  - Line numbers on both sides
+  - Synced scrolling between left and right panes
+  - Change minimap with colored markers (clickable to jump)
+  - Prev/Next change navigation buttons with block counter
+  - Tab selector shows server/path info to distinguish same-named files
+- Custom SVG icon — green gradient notepad with yellow pencil
+- `///` + Tab snippet expands to separator line
+- Debug mode toggle in menu (logs to console)
+- `.gitignore` for `__pycache__`
+
+### Fixed
+- Tab close X button using stale page number after reindexing
+- Untitled tab label not updating after Save As (closure bug)
+- Untitled counter now reuses numbers when tabs are closed
+- Open/Save dialogs remember last used folder
+- `///` + Tab works anywhere (completion popup dismissed first)
+- Menu renamed: "Settings" → "Server Manager"
+- Diff block counting consistent between nav bar and status bar
+
+## [1.10.0] - 2026-04-11
+
+Maintenance release with debug mode, icon, and bug fixes.
+
 ## [1.9.0] - 2026-04-11
 
 ### Added

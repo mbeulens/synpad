@@ -14,6 +14,7 @@ A lightweight PHP/JS IDE with FTP/SFTP integration for Linux, built with Python 
 - **JSON and XML** pretty print
 - **Tab management** — right-click context menu with close, close all, close all but this
 - **Session persistence** — all open tabs restore on restart, including unsaved changes
+- **Compare Tabs** — side-by-side diff view with color coding, synced scrolling, change navigation, and minimap
 
 ### Remote File Management
 - **FTP & SFTP** connection with SSH key auth (RSA, Ed25519, ECDSA)
@@ -94,6 +95,7 @@ StartupWMClass=synpad
 | Ctrl+W | Close tab |
 | Ctrl+Q | Quit |
 | Tab (on `/**`) | Generate docblock |
+| Tab (on `///`) | Insert separator line |
 | Escape | Close search / console |
 
 ## Changelog
