@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.8.10"
+APP_VERSION = "1.8.11"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -1304,6 +1304,7 @@ class SynPadWindow(Gtk.Window):
         self.ftp_mgr = None  # set on connect (FTPManager or SFTPManager)
         self.current_server_guid = ''  # GUID of currently connected server
         self._pending_upload = None   # (tab, page_num, max_mb) for auto-switch
+        self._pending_tree_reload = None  # vals dict for tree reload after upload
         self.tabs = {}  # page_num -> OpenTab
         self.current_remote_dir = '/'
         self.tmp_dir = tempfile.mkdtemp(prefix='synpad_')
@@ -3686,18 +3687,21 @@ class SynPadWindow(Gtk.Window):
         self._console_log(
             f"Switched to {vals['username']}@{vals['host']}", 'success')
 
-        # Reload file tree for the new server
-        start_dir = vals.get('home_directory', '').strip()
-        if not start_dir and self.ftp_mgr:
-            start_dir = self.ftp_mgr.home_dir
-        if start_dir:
-            self._load_tree(start_dir)
-
-        # Perform the pending upload
-        if hasattr(self, '_pending_upload') and self._pending_upload:
+        # Perform the pending upload FIRST, then reload tree
+        # (both use the SFTP connection which is not thread-safe)
+        if self._pending_upload:
             tab, page_num, max_mb = self._pending_upload
             self._pending_upload = None
+            # Upload, and reload tree after upload completes
+            self._pending_tree_reload = vals
             self._do_upload(tab, page_num, max_mb)
+        else:
+            # No pending upload — just reload tree
+            start_dir = vals.get('home_directory', '').strip()
+            if not start_dir and self.ftp_mgr:
+                start_dir = self.ftp_mgr.home_dir
+            if start_dir:
+                self._load_tree(start_dir)
 
     def _on_upload_done(self, tab, page_num):
         tab.buffer.set_modified(False)
@@ -3705,6 +3709,16 @@ class SynPadWindow(Gtk.Window):
         size_kb = os.path.getsize(tab.local_path) / 1024
         self._set_status(f"Uploaded {tab.remote_path} ({size_kb:.1f} KB)")
         self._console_log(f"PUT OK {tab.remote_path} ({size_kb:.1f} KB)", 'success')
+
+        # If there's a pending tree reload (from server switch), do it now
+        if hasattr(self, '_pending_tree_reload') and self._pending_tree_reload:
+            vals = self._pending_tree_reload
+            self._pending_tree_reload = None
+            start_dir = vals.get('home_directory', '').strip()
+            if not start_dir and self.ftp_mgr:
+                start_dir = self.ftp_mgr.home_dir
+            if start_dir:
+                self._load_tree(start_dir)
 
     def _on_upload_failed(self, err):
         self.item_save.set_sensitive(True)
