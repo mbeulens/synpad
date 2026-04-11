@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.9.3"
+APP_VERSION = "1.9.4"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -4203,6 +4203,34 @@ class SynPadWindow(Gtk.Window):
 
     # -- Docblock Generation ---------------------------------------------------
 
+    def _try_expand_snippet(self, view):
+        """Try to expand /// or /** on the current line. Returns True if expanded."""
+        buf = view.get_buffer()
+        cursor = buf.get_iter_at_mark(buf.get_insert())
+        line_num = cursor.get_line()
+
+        line_start = buf.get_iter_at_line(line_num)
+        line_end = line_start.copy()
+        if not line_end.ends_line():
+            line_end.forward_to_line_end()
+        line_text = buf.get_text(line_start, line_end, False)
+        stripped = line_text.strip()
+
+        # /// -> separator line
+        if stripped == '///':
+            buf.begin_user_action()
+            buf.delete(line_start, line_end)
+            buf.insert(line_start,
+                       '//-----------------------------------------------------------------------------+')
+            buf.end_user_action()
+            return True
+
+        # /** -> docblock
+        if stripped == '/**':
+            return self._try_expand_docblock(view)
+
+        return False
+
     def _try_expand_docblock(self, view):
         """If cursor is on a line containing only '/**', expand to a docblock.
         Returns True if expanded, False otherwise."""
@@ -4377,9 +4405,9 @@ class SynPadWindow(Gtk.Window):
 
     def _on_editor_key_press(self, _view, event):
         """Intercept keys on the source view before GtkSourceView handles them."""
-        # Tab on /** line → expand docblock
+        # Tab on /// or /** line → expand snippet
         if event.keyval == Gdk.KEY_Tab:
-            if self._try_expand_docblock(_view):
+            if self._try_expand_snippet(_view):
                 return True
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
         if ctrl and event.keyval == Gdk.KEY_f:
