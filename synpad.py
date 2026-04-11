@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.6"
+APP_VERSION = "1.11.7"
 DEBUG_MODE = False
 
 import gi
@@ -3882,42 +3882,155 @@ class SynPadWindow(Gtk.Window):
                         file_changed = True
 
                 # Step 2: definitive hash check (if mtime changed or unavailable)
+                # Download remote content for hash + potential compare
+                remote_content = None
                 if file_changed or (tab.remote_mtime is None and tab.remote_hash):
-                    current_hash = mgr.get_remote_hash(tab.remote_path)
+                    # Download remote file to temp for hash and compare
+                    remote_tmp = tab.local_path + '.remote_tmp'
+                    try:
+                        mgr.download(tab.remote_path, remote_tmp)
+                        with open(remote_tmp, 'rb') as f:
+                            remote_bytes = f.read()
+                        current_hash = hashlib.sha256(remote_bytes).hexdigest()
+                        remote_content = remote_bytes.decode('utf-8', errors='replace')
+                    except Exception:
+                        current_hash = None
+                        remote_content = None
+                    finally:
+                        try:
+                            os.unlink(remote_tmp)
+                        except Exception:
+                            pass
+
                     if current_hash and tab.remote_hash and current_hash != tab.remote_hash:
                         self._debug(f"Server hash changed: {tab.remote_hash[:12]}... -> {current_hash[:12]}...")
                         file_changed = True
                     elif current_hash and tab.remote_hash and current_hash == tab.remote_hash:
-                        # Mtime changed but content is the same (e.g. touch, copy)
                         self._debug("Mtime changed but hash is identical — safe to upload")
                         file_changed = False
 
                 if file_changed:
                     import queue
+                    # result: 'overwrite', 'use_remote', 'cancel', or 'compare'
                     result_q = queue.Queue()
+                    # Get local content for potential compare
+                    with open(tab.local_path, 'r', errors='replace') as f:
+                        local_content = f.read()
+
+                    RESP_OVERWRITE = 1
+                    RESP_USE_REMOTE = 2
+                    RESP_COMPARE = 3
+                    RESP_CANCEL = 4
 
                     def _ask_overwrite():
-                        dlg = Gtk.MessageDialog(
-                            transient_for=self, modal=True,
-                            message_type=Gtk.MessageType.WARNING,
-                            buttons=Gtk.ButtonsType.YES_NO,
-                            text="File Modified on Server",
+                        dlg = Gtk.Dialog(
+                            title="File Modified on Server",
+                            transient_for=self,
+                            modal=True,
+                            use_header_bar=False,
                         )
-                        dlg.format_secondary_text(
-                            f"'{os.path.basename(tab.remote_path)}' has been "
-                            f"modified on the server since you opened it.\n\n"
-                            f"Overwrite the server version?")
-                        resp = dlg.run()
-                        dlg.destroy()
-                        result_q.put(resp == Gtk.ResponseType.YES)
+                        dlg.set_default_size(450, -1)
+
+                        box = dlg.get_content_area()
+                        box.set_spacing(8)
+                        box.set_margin_start(12)
+                        box.set_margin_end(12)
+                        box.set_margin_top(12)
+                        box.set_margin_bottom(12)
+
+                        # Warning icon + text
+                        msg_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+                        icon = Gtk.Image.new_from_icon_name('dialog-warning-symbolic',
+                                                            Gtk.IconSize.DIALOG)
+                        msg_box.pack_start(icon, False, False, 0)
+
+                        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                        title_lbl = Gtk.Label()
+                        title_lbl.set_markup("<b>File Modified on Server</b>")
+                        title_lbl.set_halign(Gtk.Align.START)
+                        text_box.pack_start(title_lbl, False, False, 0)
+
+                        desc_lbl = Gtk.Label(
+                            label=f"'{os.path.basename(tab.remote_path)}' has been "
+                                  f"modified on the server since you opened it.")
+                        desc_lbl.set_halign(Gtk.Align.START)
+                        desc_lbl.set_line_wrap(True)
+                        text_box.pack_start(desc_lbl, False, False, 0)
+                        msg_box.pack_start(text_box, True, True, 0)
+                        box.pack_start(msg_box, False, False, 0)
+
+                        box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
+                                       False, False, 4)
+
+                        # Buttons
+                        btn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+                        btn_overwrite = Gtk.Button(label="Overwrite server with my changes")
+                        btn_overwrite.connect('clicked',
+                            lambda _: [result_q.put(RESP_OVERWRITE), dlg.destroy()])
+                        btn_box.pack_start(btn_overwrite, False, False, 0)
+
+                        btn_remote = Gtk.Button(label="Discard my changes, use server version")
+                        btn_remote.connect('clicked',
+                            lambda _: [result_q.put(RESP_USE_REMOTE), dlg.destroy()])
+                        btn_box.pack_start(btn_remote, False, False, 0)
+
+                        btn_compare = Gtk.Button(label="Compare both versions")
+                        btn_compare.get_style_context().add_class('suggested-action')
+                        btn_compare.connect('clicked',
+                            lambda _: [result_q.put(RESP_COMPARE), dlg.destroy()])
+                        btn_box.pack_start(btn_compare, False, False, 0)
+
+                        btn_cancel = Gtk.Button(label="Cancel")
+                        btn_cancel.connect('clicked',
+                            lambda _: [result_q.put(RESP_CANCEL), dlg.destroy()])
+                        btn_box.pack_start(btn_cancel, False, False, 0)
+
+                        box.pack_start(btn_box, False, False, 0)
+                        dlg.connect('delete-event',
+                            lambda *a: [result_q.put(RESP_CANCEL), True])
+                        dlg.show_all()
 
                     GLib.idle_add(_ask_overwrite)
-                    overwrite = result_q.get()
-                    if not overwrite:
+                    choice = result_q.get()
+
+                    if choice == RESP_CANCEL:
                         GLib.idle_add(self.item_save.set_sensitive, True)
                         GLib.idle_add(self._set_status, "Upload cancelled")
                         self._console_log("PUT CANCELLED — server file was modified", 'error')
                         return
+                    elif choice == RESP_USE_REMOTE:
+                        # Replace local content with remote
+                        if remote_content:
+                            def _load_remote():
+                                tab.buffer.begin_user_action()
+                                tab.buffer.set_text(remote_content)
+                                tab.buffer.end_user_action()
+                                tab.buffer.set_modified(False)
+                                tab.remote_hash = hashlib.sha256(
+                                    remote_content.encode('utf-8')).hexdigest()
+                                tab.remote_mtime = mgr.get_remote_mtime(tab.remote_path)
+                                tab.remote_size = mgr.get_remote_size(tab.remote_path)
+                                self._set_status(f"Loaded server version of {os.path.basename(tab.remote_path)}")
+                                self._console_log(f"Loaded server version: {tab.remote_path}", 'success')
+                                self.item_save.set_sensitive(True)
+                            GLib.idle_add(_load_remote)
+                        else:
+                            GLib.idle_add(self.item_save.set_sensitive, True)
+                        return
+                    elif choice == RESP_COMPARE:
+                        # Show diff, then ask again
+                        if remote_content:
+                            def _show_compare():
+                                self._show_conflict_diff(
+                                    tab, local_content, remote_content,
+                                    page_num, max_mb, mgr)
+                                self.item_save.set_sensitive(True)
+                            GLib.idle_add(_show_compare)
+                        else:
+                            GLib.idle_add(self.item_save.set_sensitive, True)
+                        return
+                    # RESP_OVERWRITE falls through to upload
 
                 mgr.upload(tab.remote_path, tab.local_path, max_mb)
                 # Update stored stats after successful upload
@@ -4741,6 +4854,198 @@ class SynPadWindow(Gtk.Window):
             return False
         GLib.timeout_add(200, _init_minimap)
         GLib.timeout_add(500, _init_minimap)
+
+    def _show_conflict_diff(self, tab, local_content, remote_content,
+                            page_num, max_mb, mgr):
+        """Show a diff between local changes and server version with action buttons."""
+        import difflib
+
+        name = os.path.basename(tab.remote_path)
+        lines_local = local_content.splitlines()
+        lines_remote = remote_content.splitlines()
+
+        sm = difflib.SequenceMatcher(None, lines_local, lines_remote)
+        opcodes = sm.get_opcodes()
+
+        diff_rows = []
+        for op, i1, i2, j1, j2 in opcodes:
+            if op == 'equal':
+                for i, j in zip(range(i1, i2), range(j1, j2)):
+                    diff_rows.append((lines_local[i], lines_remote[j], 'equal'))
+            elif op == 'replace':
+                paired = min(i2 - i1, j2 - j1)
+                for k in range(paired):
+                    diff_rows.append((lines_local[i1 + k], lines_remote[j1 + k], 'replace'))
+                for k in range(paired, i2 - i1):
+                    diff_rows.append((lines_local[i1 + k], '', 'delete'))
+                for k in range(paired, j2 - j1):
+                    diff_rows.append(('', lines_remote[j1 + k], 'insert'))
+            elif op == 'delete':
+                for i in range(i1, i2):
+                    diff_rows.append((lines_local[i], '', 'delete'))
+            elif op == 'insert':
+                for j in range(j1, j2):
+                    diff_rows.append(('', lines_remote[j], 'insert'))
+
+        win = Gtk.Window(
+            title=f"Conflict: {name} — My Changes vs Server",
+            transient_for=self,
+            destroy_with_parent=True,
+        )
+        win.set_default_size(1000, 700)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        # Action buttons at top
+        action_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        action_bar.set_margin_start(8)
+        action_bar.set_margin_end(8)
+        action_bar.set_margin_top(6)
+        action_bar.set_margin_bottom(6)
+
+        btn_use_mine = Gtk.Button(label="Use My Changes (Overwrite Server)")
+        btn_use_mine.get_style_context().add_class('destructive-action')
+        action_bar.pack_start(btn_use_mine, False, False, 0)
+
+        btn_use_server = Gtk.Button(label="Use Server Version")
+        action_bar.pack_start(btn_use_server, False, False, 0)
+
+        btn_cancel = Gtk.Button(label="Cancel")
+        action_bar.pack_end(btn_cancel, False, False, 0)
+
+        outer.pack_start(action_bar, False, False, 0)
+        outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
+                         False, False, 0)
+
+        # Build side-by-side diff view (reuse the same approach as Compare Tabs)
+        content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+
+        left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        left_header = Gtk.Label()
+        left_header.set_markup(f"<b>My Changes</b>")
+        left_header.set_margin_start(6)
+        left_header.set_margin_top(4)
+        left_header.set_margin_bottom(4)
+        left_header.set_halign(Gtk.Align.START)
+        left_box.pack_start(left_header, False, False, 0)
+
+        left_scroll = Gtk.ScrolledWindow()
+        left_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        left_buf = Gtk.TextBuffer()
+        left_buf.create_tag('replace', background='#edd400', foreground='#000000')
+        left_buf.create_tag('delete', background='#ef2929', foreground='#ffffff')
+        left_buf.create_tag('insert', background='#555753', foreground='#888a85')
+        left_view = Gtk.TextView(buffer=left_buf)
+        left_view.set_editable(False)
+        left_view.set_cursor_visible(False)
+        left_view.set_monospace(True)
+        left_scroll.add(left_view)
+        left_box.pack_start(left_scroll, True, True, 0)
+
+        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        right_header = Gtk.Label()
+        right_header.set_markup(f"<b>Server Version</b>")
+        right_header.set_margin_start(6)
+        right_header.set_margin_top(4)
+        right_header.set_margin_bottom(4)
+        right_header.set_halign(Gtk.Align.START)
+        right_box.pack_start(right_header, False, False, 0)
+
+        right_scroll = Gtk.ScrolledWindow()
+        right_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        right_buf = Gtk.TextBuffer()
+        right_buf.create_tag('replace', background='#edd400', foreground='#000000')
+        right_buf.create_tag('insert', background='#73d216', foreground='#000000')
+        right_buf.create_tag('delete', background='#555753', foreground='#888a85')
+        right_view = Gtk.TextView(buffer=right_buf)
+        right_view.set_editable(False)
+        right_view.set_cursor_visible(False)
+        right_view.set_monospace(True)
+        right_scroll.add(right_view)
+        right_box.pack_start(right_scroll, True, True, 0)
+
+        # Sync scrolling
+        _syncing = [False]
+        def _sync_lr(*_a):
+            if _syncing[0]: return
+            _syncing[0] = True
+            right_scroll.get_vadjustment().set_value(left_scroll.get_vadjustment().get_value())
+            _syncing[0] = False
+        def _sync_rl(*_a):
+            if _syncing[0]: return
+            _syncing[0] = True
+            left_scroll.get_vadjustment().set_value(right_scroll.get_vadjustment().get_value())
+            _syncing[0] = False
+        left_scroll.get_vadjustment().connect('value-changed', _sync_lr)
+        right_scroll.get_vadjustment().connect('value-changed', _sync_rl)
+
+        content_box.pack_start(left_box, True, True, 0)
+        content_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL),
+                               False, False, 0)
+        content_box.pack_start(right_box, True, True, 0)
+
+        # Fill buffers
+        for left_text, right_text, tag in diff_rows:
+            end_l = left_buf.get_end_iter()
+            if tag == 'equal':
+                left_buf.insert(end_l, f"{left_text}\n")
+            elif tag == 'insert':
+                left_buf.insert_with_tags_by_name(end_l, '\n', tag)
+            else:
+                left_buf.insert_with_tags_by_name(end_l, f"{left_text}\n", tag)
+
+            end_r = right_buf.get_end_iter()
+            if tag == 'equal':
+                right_buf.insert(end_r, f"{right_text}\n")
+            elif tag == 'delete':
+                right_buf.insert_with_tags_by_name(end_r, '\n', tag)
+            else:
+                right_buf.insert_with_tags_by_name(end_r, f"{right_text}\n", tag)
+
+        outer.pack_start(content_box, True, True, 0)
+
+        # Button actions
+        def _on_use_mine(_btn):
+            win.destroy()
+            self._set_status(f"Uploading {tab.remote_path} (overwrite)...")
+            self.item_save.set_sensitive(False)
+            def _upload():
+                try:
+                    mgr.upload(tab.remote_path, tab.local_path, max_mb)
+                    tab.remote_mtime = mgr.get_remote_mtime(tab.remote_path)
+                    tab.remote_size = mgr.get_remote_size(tab.remote_path)
+                    with open(tab.local_path, 'rb') as f:
+                        tab.remote_hash = hashlib.sha256(f.read()).hexdigest()
+                    GLib.idle_add(self._on_upload_done, tab, page_num)
+                except Exception as e:
+                    GLib.idle_add(self._on_upload_failed, str(e))
+            threading.Thread(target=_upload, daemon=True).start()
+
+        def _on_use_server(_btn):
+            win.destroy()
+            tab.buffer.begin_user_action()
+            tab.buffer.set_text(remote_content)
+            tab.buffer.end_user_action()
+            tab.buffer.set_modified(False)
+            tab.remote_hash = hashlib.sha256(
+                remote_content.encode('utf-8')).hexdigest()
+            tab.remote_mtime = mgr.get_remote_mtime(tab.remote_path)
+            tab.remote_size = mgr.get_remote_size(tab.remote_path)
+            with open(tab.local_path, 'w') as f:
+                f.write(remote_content)
+            self._set_status(f"Loaded server version of {name}")
+            self._console_log(f"Using server version: {tab.remote_path}", 'success')
+
+        def _on_cancel(_btn):
+            win.destroy()
+            self._set_status("Upload cancelled")
+
+        btn_use_mine.connect('clicked', _on_use_mine)
+        btn_use_server.connect('clicked', _on_use_server)
+        btn_cancel.connect('clicked', _on_cancel)
+
+        win.add(outer)
+        win.show_all()
 
     def _on_goto_line(self):
         """Show a small dialog to jump to a line number."""
