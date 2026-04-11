@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.7"
+APP_VERSION = "1.11.8"
 DEBUG_MODE = False
 
 import gi
@@ -4984,23 +4984,40 @@ class SynPadWindow(Gtk.Window):
                                False, False, 0)
         content_box.pack_start(right_box, True, True, 0)
 
-        # Fill buffers
+        # Fill buffers with line numbers
+        left_buf.create_tag('linenum', foreground='#888a85')
+        right_buf.create_tag('linenum', foreground='#888a85')
+        max_digits = len(str(max(len(lines_local), len(lines_remote))))
+        left_num = 0
+        right_num = 0
         for left_text, right_text, tag in diff_rows:
             end_l = left_buf.get_end_iter()
-            if tag == 'equal':
-                left_buf.insert(end_l, f"{left_text}\n")
-            elif tag == 'insert':
-                left_buf.insert_with_tags_by_name(end_l, '\n', tag)
+            if tag == 'insert':
+                left_buf.insert_with_tags_by_name(end_l,
+                    f"{'':>{max_digits}}  \n", tag)
             else:
-                left_buf.insert_with_tags_by_name(end_l, f"{left_text}\n", tag)
+                left_num += 1
+                left_buf.insert_with_tags_by_name(end_l,
+                    f"{left_num:>{max_digits}}  ", 'linenum')
+                end_l = left_buf.get_end_iter()
+                if tag == 'equal':
+                    left_buf.insert(end_l, f"{left_text}\n")
+                else:
+                    left_buf.insert_with_tags_by_name(end_l, f"{left_text}\n", tag)
 
             end_r = right_buf.get_end_iter()
-            if tag == 'equal':
-                right_buf.insert(end_r, f"{right_text}\n")
-            elif tag == 'delete':
-                right_buf.insert_with_tags_by_name(end_r, '\n', tag)
+            if tag == 'delete':
+                right_buf.insert_with_tags_by_name(end_r,
+                    f"{'':>{max_digits}}  \n", tag)
             else:
-                right_buf.insert_with_tags_by_name(end_r, f"{right_text}\n", tag)
+                right_num += 1
+                right_buf.insert_with_tags_by_name(end_r,
+                    f"{right_num:>{max_digits}}  ", 'linenum')
+                end_r = right_buf.get_end_iter()
+                if tag == 'equal':
+                    right_buf.insert(end_r, f"{right_text}\n")
+                else:
+                    right_buf.insert_with_tags_by_name(end_r, f"{right_text}\n", tag)
 
         outer.pack_start(content_box, True, True, 0)
 
