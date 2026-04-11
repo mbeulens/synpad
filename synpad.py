@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.4"
+APP_VERSION = "1.11.5"
 DEBUG_MODE = False
 
 import gi
@@ -164,6 +164,18 @@ class FTPManager:
     def get_remote_size(self, remote_path):
         try:
             return self.ftp.size(remote_path)
+        except Exception:
+            return None
+
+    def get_remote_mtime(self, remote_path):
+        """Get the modification time of a remote file (Unix timestamp)."""
+        try:
+            resp = self.ftp.sendcmd(f'MDTM {remote_path}')
+            # Response: 213 YYYYMMDDHHMMSS
+            ts_str = resp.split()[1]
+            import datetime
+            dt = datetime.datetime.strptime(ts_str, '%Y%m%d%H%M%S')
+            return dt.timestamp()
         except Exception:
             return None
 
@@ -331,6 +343,13 @@ class SFTPManager:
     def get_remote_size(self, remote_path):
         try:
             return self.sftp.stat(remote_path).st_size
+        except Exception:
+            return None
+
+    def get_remote_mtime(self, remote_path):
+        """Get the modification time of a remote file (Unix timestamp)."""
+        try:
+            return self.sftp.stat(remote_path).st_mtime
         except Exception:
             return None
 
@@ -1250,6 +1269,8 @@ class OpenTab:
         self.modified = False
         self.is_local = is_local  # True for local files, False for remote
         self.server_guid = server_guid  # GUID of the server this file belongs to
+        self.remote_mtime = None  # remote file mtime when opened/last saved
+        self.remote_size = None   # remote file size when opened/last saved
 
 
 # --- Main Window -------------------------------------------------------------
@@ -3270,11 +3291,25 @@ class SynPadWindow(Gtk.Window):
 
         def work():
             try:
+                # Capture remote file stats before download
+                r_mtime = self.ftp_mgr.get_remote_mtime(remote_path)
+                r_size = self.ftp_mgr.get_remote_size(remote_path)
                 self.ftp_mgr.download(remote_path, local_path)
                 with open(local_path, 'r', errors='replace') as f:
                     content = f.read()
-                GLib.idle_add(self._create_editor_tab, remote_path, local_path,
-                              content, False, srv_guid)
+
+                def _create_and_set_stats():
+                    self._create_editor_tab(remote_path, local_path,
+                                            content, False, srv_guid)
+                    # Set remote stats on the newly created tab
+                    page_num = self.notebook.get_current_page()
+                    tab = self.tabs.get(page_num)
+                    if tab:
+                        tab.remote_mtime = r_mtime
+                        tab.remote_size = r_size
+                        self._debug(f"Stored remote stats: mtime={r_mtime}, size={r_size}")
+
+                GLib.idle_add(_create_and_set_stats)
             except Exception as e:
                 GLib.idle_add(self._show_error, "Download Failed", str(e))
                 GLib.idle_add(self._set_status, "Download failed")
@@ -3809,7 +3844,44 @@ class SynPadWindow(Gtk.Window):
 
         def work():
             try:
+                # Check if file was modified on server since we opened it
+                if tab.remote_mtime is not None:
+                    current_mtime = mgr.get_remote_mtime(tab.remote_path)
+                    if current_mtime and current_mtime > tab.remote_mtime:
+                        self._debug(f"Server mtime changed: {tab.remote_mtime} -> {current_mtime}")
+                        # Ask user on main thread and wait for response
+                        import queue
+                        result_q = queue.Queue()
+
+                        def _ask_overwrite():
+                            dlg = Gtk.MessageDialog(
+                                transient_for=self, modal=True,
+                                message_type=Gtk.MessageType.WARNING,
+                                buttons=Gtk.ButtonsType.YES_NO,
+                                text="File Modified on Server",
+                            )
+                            dlg.format_secondary_text(
+                                f"'{os.path.basename(tab.remote_path)}' has been "
+                                f"modified on the server since you opened it.\n\n"
+                                f"Overwrite the server version?")
+                            resp = dlg.run()
+                            dlg.destroy()
+                            result_q.put(resp == Gtk.ResponseType.YES)
+
+                        GLib.idle_add(_ask_overwrite)
+                        overwrite = result_q.get()  # blocks until user answers
+                        if not overwrite:
+                            GLib.idle_add(self.item_save.set_sensitive, True)
+                            GLib.idle_add(self._set_status, "Upload cancelled")
+                            self._console_log("PUT CANCELLED — server file was modified", 'error')
+                            return
+
                 mgr.upload(tab.remote_path, tab.local_path, max_mb)
+                # Update stored mtime/size after successful upload
+                new_mtime = mgr.get_remote_mtime(tab.remote_path)
+                new_size = mgr.get_remote_size(tab.remote_path)
+                tab.remote_mtime = new_mtime
+                tab.remote_size = new_size
                 GLib.idle_add(self._on_upload_done, tab, page_num)
             except Exception as e:
                 GLib.idle_add(self._on_upload_failed, str(e))
