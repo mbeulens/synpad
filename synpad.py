@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.8.4"
+APP_VERSION = "1.8.5"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -3760,8 +3760,186 @@ class SynPadWindow(Gtk.Window):
             tab.source_view.grab_focus()
         dlg.destroy()
 
+    # -- Docblock Generation ---------------------------------------------------
+
+    def _try_expand_docblock(self, view):
+        """If cursor is on a line containing only '/**', expand to a docblock.
+        Returns True if expanded, False otherwise."""
+        buf = view.get_buffer()
+        cursor = buf.get_iter_at_mark(buf.get_insert())
+        line_num = cursor.get_line()
+
+        # Get the current line text
+        line_start = buf.get_iter_at_line(line_num)
+        line_end = line_start.copy()
+        if not line_end.ends_line():
+            line_end.forward_to_line_end()
+        line_text = buf.get_text(line_start, line_end, False)
+
+        # Check if line is just whitespace + /**
+        stripped = line_text.strip()
+        if stripped != '/**':
+            return False
+
+        # Get the indentation
+        indent = line_text[:len(line_text) - len(line_text.lstrip())]
+
+        # Get the file extension to determine language
+        page_num = self.notebook.get_current_page()
+        tab = self.tabs.get(page_num)
+        if not tab:
+            return False
+        ext = self._get_file_ext(tab.remote_path)
+        if ext not in ('php', 'js', 'jsx', 'ts', 'tsx'):
+            return False
+
+        # Read the next non-empty line to find the function signature
+        total_lines = buf.get_line_count()
+        func_line = None
+        for i in range(line_num + 1, min(line_num + 5, total_lines)):
+            next_start = buf.get_iter_at_line(i)
+            next_end = next_start.copy()
+            if not next_end.ends_line():
+                next_end.forward_to_line_end()
+            next_text = buf.get_text(next_start, next_end, False).strip()
+            if next_text:
+                func_line = next_text
+                break
+
+        if not func_line:
+            return False
+
+        # Parse the function signature
+        if ext == 'php':
+            docblock = self._generate_php_docblock(func_line, indent)
+        else:
+            docblock = self._generate_js_docblock(func_line, indent)
+
+        if not docblock:
+            return False
+
+        # Replace the /** line with the full docblock
+        buf.begin_user_action()
+        buf.delete(line_start, line_end)
+        buf.insert(line_start, docblock)
+        buf.end_user_action()
+        return True
+
+    def _generate_php_docblock(self, func_line, indent):
+        """Generate a PHP docblock from a function signature."""
+        # Match: function name(params): returntype
+        # or: public static function name(params): returntype
+        m = re.match(
+            r'(?:(?:public|private|protected|static|abstract|final)\s+)*'
+            r'function\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*(\S+))?',
+            func_line.strip()
+        )
+        if not m:
+            return None
+
+        func_name = m.group(1)
+        params_str = m.group(2).strip()
+        return_type = m.group(3) or 'void'
+
+        lines = [f'{indent}/**']
+        lines.append(f'{indent} * {func_name}')
+        lines.append(f'{indent} *')
+
+        # Parse parameters
+        if params_str:
+            for param in params_str.split(','):
+                param = param.strip()
+                if not param:
+                    continue
+                # PHP param formats: Type $name, $name, Type $name = default
+                parts = param.split('=')[0].strip().split()
+                if len(parts) >= 2:
+                    ptype = parts[-2].lstrip('?').lstrip('&')
+                    pname = parts[-1]
+                else:
+                    ptype = 'mixed'
+                    pname = parts[0]
+                # Clean up $name
+                pname = pname.lstrip('&').lstrip('.')
+                if not pname.startswith('$'):
+                    pname = '$' + pname
+                lines.append(f'{indent} * @param {ptype} {pname}')
+
+        lines.append(f'{indent} * @return {return_type}')
+        lines.append(f'{indent} */')
+
+        return '\n'.join(lines)
+
+    def _generate_js_docblock(self, func_line, indent):
+        """Generate a JSDoc block from a JS/TS function signature."""
+        # Match various function forms:
+        # function name(params) {
+        # async function name(params) {
+        # const name = (params) => {
+        # name(params) {  (class method)
+        # export function name(params): returntype {
+
+        # Try function declaration
+        m = re.match(
+            r'(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*(\S+))?',
+            func_line.strip()
+        )
+        if not m:
+            # Try arrow function: const name = (params) =>
+            m = re.match(
+                r'(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?'
+                r'\(([^)]*)\)(?:\s*:\s*(\S+))?\s*=>',
+                func_line.strip()
+            )
+        if not m:
+            # Try class method: name(params) {
+            m = re.match(
+                r'(?:(?:static|async|get|set|public|private|protected)\s+)*'
+                r'(\w+)\s*\(([^)]*)\)(?:\s*:\s*(\S+))?\s*\{',
+                func_line.strip()
+            )
+        if not m:
+            return None
+
+        func_name = m.group(1)
+        params_str = m.group(2).strip()
+        return_type = m.group(3)
+
+        lines = [f'{indent}/**']
+        lines.append(f'{indent} * {func_name}')
+        lines.append(f'{indent} *')
+
+        # Parse parameters
+        if params_str:
+            for param in params_str.split(','):
+                param = param.strip()
+                if not param:
+                    continue
+                # JS/TS param formats: name, name: type, name: type = default, ...name
+                param = param.split('=')[0].strip()
+                if ':' in param:
+                    pname, ptype = param.split(':', 1)
+                    pname = pname.strip().lstrip('.')
+                    ptype = ptype.strip()
+                else:
+                    pname = param.lstrip('.')
+                    ptype = '*'
+                lines.append(f'{indent} * @param {{{ptype}}} {pname}')
+
+        if return_type:
+            lines.append(f'{indent} * @returns {{{return_type}}}')
+        else:
+            lines.append(f'{indent} * @returns {{*}}')
+        lines.append(f'{indent} */')
+
+        return '\n'.join(lines)
+
     def _on_editor_key_press(self, _view, event):
         """Intercept keys on the source view before GtkSourceView handles them."""
+        # Tab on /** line → expand docblock
+        if event.keyval == Gdk.KEY_Tab:
+            if self._try_expand_docblock(_view):
+                return True
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
         if ctrl and event.keyval == Gdk.KEY_f:
             self._show_search(show_replace=False)
