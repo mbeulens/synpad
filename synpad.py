@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.8"
+APP_VERSION = "1.10.9"
 DEBUG_MODE = False
 
 import gi
@@ -4381,9 +4381,6 @@ class SynPadWindow(Gtk.Window):
         # Left + Right panes in a horizontal box with synced scrolling
         content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
 
-        # Shared vertical adjustment for synced scrolling
-        vadj = Gtk.Adjustment()
-
         # --- Left pane ---
         left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         left_header = Gtk.Label()
@@ -4395,8 +4392,7 @@ class SynPadWindow(Gtk.Window):
         left_box.pack_start(left_header, False, False, 0)
 
         left_scroll = Gtk.ScrolledWindow()
-        left_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.EXTERNAL)
-        left_scroll.set_vadjustment(vadj)
+        left_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
 
         left_buf = Gtk.TextBuffer()
         left_buf.create_tag('replace', background='#edd400', foreground='#000000')
@@ -4421,8 +4417,7 @@ class SynPadWindow(Gtk.Window):
         right_box.pack_start(right_header, False, False, 0)
 
         right_scroll = Gtk.ScrolledWindow()
-        right_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.EXTERNAL)
-        right_scroll.set_vadjustment(vadj)
+        right_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
 
         right_buf = Gtk.TextBuffer()
         right_buf.create_tag('replace', background='#edd400', foreground='#000000')
@@ -4462,6 +4457,31 @@ class SynPadWindow(Gtk.Window):
             else:
                 right_buf.insert_with_tags_by_name(end_r, f"{right_text}\n", tag)
 
+        # --- Sync scrolling between left and right ---
+        # Use left's vadjustment as the master
+        _syncing = [False]
+
+        def _sync_left_to_right(*_args):
+            if _syncing[0]:
+                return
+            _syncing[0] = True
+            left_vadj = left_scroll.get_vadjustment()
+            right_vadj = right_scroll.get_vadjustment()
+            right_vadj.set_value(left_vadj.get_value())
+            _syncing[0] = False
+
+        def _sync_right_to_left(*_args):
+            if _syncing[0]:
+                return
+            _syncing[0] = True
+            left_vadj = left_scroll.get_vadjustment()
+            right_vadj = right_scroll.get_vadjustment()
+            left_vadj.set_value(right_vadj.get_value())
+            _syncing[0] = False
+
+        left_scroll.get_vadjustment().connect('value-changed', _sync_left_to_right)
+        right_scroll.get_vadjustment().connect('value-changed', _sync_right_to_left)
+
         # --- Change minimap (right edge) ---
         minimap = Gtk.DrawingArea()
         minimap.set_size_request(24, -1)
@@ -4489,38 +4509,43 @@ class SynPadWindow(Gtk.Window):
                 cr.rectangle(2, y, w - 4, max(2, h / total_lines))
                 cr.fill()
             # Viewport indicator
-            if vadj.get_upper() > 0:
-                vp_start = vadj.get_value() / vadj.get_upper() * h
-                vp_height = vadj.get_page_size() / vadj.get_upper() * h
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.15)
-                cr.rectangle(0, vp_start, w, vp_height)
+            vadj = left_scroll.get_vadjustment()
+            upper = vadj.get_upper()
+            if upper > 0:
+                vp_start = vadj.get_value() / upper * h
+                vp_height = vadj.get_page_size() / upper * h
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.2)
+                cr.rectangle(0, vp_start, w, max(vp_height, 4))
                 cr.fill()
+                # Border for viewport
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.4)
+                cr.set_line_width(1)
+                cr.rectangle(0.5, vp_start + 0.5, w - 1, max(vp_height, 4) - 1)
+                cr.stroke()
 
         minimap.connect('draw', on_draw_minimap)
 
         # Redraw minimap when scrolling
         def on_scroll_changed(*_args):
             minimap.queue_draw()
-        vadj.connect('value-changed', on_scroll_changed)
+        left_scroll.get_vadjustment().connect('value-changed', on_scroll_changed)
 
         # Click on minimap to scroll
         def on_minimap_click(widget, event):
             alloc = widget.get_allocation()
-            if alloc.height > 0 and total_lines > 0:
+            vadj = left_scroll.get_vadjustment()
+            upper = vadj.get_upper()
+            if alloc.height > 0 and upper > 0:
                 fraction = event.y / alloc.height
-                target = fraction * vadj.get_upper()
+                target = fraction * upper
                 vadj.set_value(max(0, target - vadj.get_page_size() / 2))
             return True
 
         minimap.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
         minimap.connect('button-press-event', on_minimap_click)
 
-        # Shared vertical scrollbar
-        vscroll = Gtk.Scrollbar(orientation=Gtk.Orientation.VERTICAL, adjustment=vadj)
-
         main_box.pack_start(content_box, True, True, 0)
         main_box.pack_start(minimap, False, False, 0)
-        main_box.pack_start(vscroll, False, False, 0)
 
         # Status bar with change count
         status = Gtk.Label()
