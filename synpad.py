@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.2"
+APP_VERSION = "1.11.3"
 DEBUG_MODE = False
 
 import gi
@@ -554,6 +554,20 @@ class ConnectDialog(Gtk.Dialog):
         server_id = combo.get_active_id()
         self._update_delete_btn()
         if server_id == '__new__' or server_id is None:
+            self._loading_server = True
+            self.name_entry.set_text('')
+            self.proto_combo.set_active_id('sftp')
+            self.host_entry.set_text('')
+            self.port_entry.set_value(22)
+            self.user_entry.set_text('')
+            self.pass_entry.set_text('')
+            self.key_entry.set_text('')
+            self.group_entry.set_text('')
+            self.home_entry.set_text('')
+            self.size_entry.set_value(5)
+            self.remember_check.set_active(False)
+            self._update_sftp_fields()
+            self._loading_server = False
             return
         srv = find_server_by_guid(self.config, server_id)
         if srv:
