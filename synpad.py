@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.8.8"
+APP_VERSION = "1.8.9"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -1281,13 +1281,15 @@ class DocumentWordProvider(GObject.Object, GtkSource.CompletionProvider):
 class OpenTab:
     """Represents one open file tab."""
 
-    def __init__(self, remote_path, local_path, source_view, buffer, is_local=False):
+    def __init__(self, remote_path, local_path, source_view, buffer,
+                 is_local=False, server_guid=''):
         self.remote_path = remote_path
         self.local_path = local_path
         self.source_view = source_view
         self.buffer = buffer
         self.modified = False
         self.is_local = is_local  # True for local files, False for remote
+        self.server_guid = server_guid  # GUID of the server this file belongs to
 
 
 # --- Main Window -------------------------------------------------------------
@@ -1902,6 +1904,7 @@ class SynPadWindow(Gtk.Window):
                 'is_local': tab.is_local,
                 'modified': tab.modified,
                 'content': content,
+                'server_guid': tab.server_guid,
             })
 
         session = {
@@ -1936,6 +1939,7 @@ class SynPadWindow(Gtk.Window):
             is_local = tab_data.get('is_local', False)
             content = tab_data.get('content', '')
             was_modified = tab_data.get('modified', False)
+            server_guid = tab_data.get('server_guid', '')
 
             if not remote_path:
                 continue
@@ -1962,7 +1966,7 @@ class SynPadWindow(Gtk.Window):
                     continue
 
             self._create_editor_tab(remote_path, local_path, content,
-                                    is_local=is_local)
+                                    is_local=is_local, server_guid=server_guid)
 
             # Mark as modified if it was unsaved
             if was_modified:
@@ -3178,20 +3182,23 @@ class SynPadWindow(Gtk.Window):
         self._console_log(f"GET {remote_path}")
         filename = os.path.basename(remote_path)
         local_path = os.path.join(self.tmp_dir, filename.replace('/', '_') + f'_{id(remote_path)}')
+        srv_guid = self.current_server_guid
 
         def work():
             try:
                 self.ftp_mgr.download(remote_path, local_path)
                 with open(local_path, 'r', errors='replace') as f:
                     content = f.read()
-                GLib.idle_add(self._create_editor_tab, remote_path, local_path, content)
+                GLib.idle_add(self._create_editor_tab, remote_path, local_path,
+                              content, False, srv_guid)
             except Exception as e:
                 GLib.idle_add(self._show_error, "Download Failed", str(e))
                 GLib.idle_add(self._set_status, "Download failed")
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _create_editor_tab(self, remote_path, local_path, content, is_local=False):
+    def _create_editor_tab(self, remote_path, local_path, content,
+                           is_local=False, server_guid=''):
         # Create source buffer with language
         lang_mgr = GtkSource.LanguageManager.get_default()
         lang = self._detect_language(lang_mgr, remote_path)
@@ -3269,7 +3276,8 @@ class SynPadWindow(Gtk.Window):
         scroll.show_all()
         self.notebook.set_current_page(page_num)
 
-        tab = OpenTab(remote_path, local_path, view, buf, is_local=is_local)
+        tab = OpenTab(remote_path, local_path, view, buf,
+                      is_local=is_local, server_guid=server_guid)
         self.tabs[page_num] = tab
 
         # Track modification
@@ -3522,44 +3530,139 @@ class SynPadWindow(Gtk.Window):
         if not tab:
             self._set_status("No file open to save")
             return
+
+        # Check if we need to switch server
+        tab_guid = tab.server_guid
+        if tab_guid and tab_guid != self.current_server_guid:
+            srv = find_server_by_guid(self.config, tab_guid)
+            if not srv:
+                self._show_error("Server Not Found",
+                    "The server profile for this file no longer exists.\n"
+                    "Connect to the correct server manually.")
+                return
+            self._console_log(
+                f"Auto-switching to '{srv['name']}' for upload...", 'success')
+            # Disconnect current
+            if self.ftp_mgr and self.ftp_mgr.connected:
+                self.ftp_mgr.disconnect()
+                self.ftp_mgr = None
+            # Reconnect to the tab's server
+            vals = dict(srv)
+            vals['server_guid'] = srv['guid']
+            vals['server_name'] = srv['name']
+            vals['remember'] = True
+            self._set_status(f"Switching to {srv['name']}...")
+            self.item_save.set_sensitive(False)
+
+            def switch_and_upload():
+                try:
+                    protocol = vals.get('protocol', 'sftp')
+                    if protocol == 'sftp':
+                        self.ftp_mgr = SFTPManager()
+                        self.ftp_mgr.connect(
+                            vals['host'], vals['port'],
+                            vals['username'], vals['password'],
+                            vals.get('ssh_key_path', ''),
+                        )
+                    else:
+                        self.ftp_mgr = FTPManager()
+                        self.ftp_mgr.connect(
+                            vals['host'], vals['port'],
+                            vals['username'], vals['password'],
+                        )
+                    GLib.idle_add(self._on_switch_connected, vals)
+                    # Now do the upload
+                    self._do_upload(tab, page_num)
+                except Exception as e:
+                    GLib.idle_add(self._on_upload_failed,
+                                  f"Server switch failed: {e}")
+
+            threading.Thread(target=switch_and_upload, daemon=True).start()
+            return
+
+        # No server switch needed — check connection
         if not self.ftp_mgr or not self.ftp_mgr.connected:
+            # Try to reconnect using the tab's server
+            if tab_guid:
+                srv = find_server_by_guid(self.config, tab_guid)
+                if srv:
+                    vals = dict(srv)
+                    vals['server_guid'] = srv['guid']
+                    vals['server_name'] = srv['name']
+                    vals['remember'] = True
+                    self._do_connect(vals)
+                    self._set_status("Reconnecting... save again after connected")
+                    return
             self._show_error("Not Connected", "Connect to a server first.")
             return
 
-        # Get content from buffer
-        start = tab.buffer.get_start_iter()
-        end = tab.buffer.get_end_iter()
-        content = tab.buffer.get_text(start, end, True)
+        self._do_upload(tab, page_num)
 
-        # Save locally
-        with open(tab.local_path, 'w') as f:
-            f.write(content)
+    def _do_upload(self, tab, page_num):
+        """Perform the actual file upload (called from main thread or bg thread)."""
+        # Get content from buffer (must be called carefully)
+        def _prepare_and_upload():
+            start = tab.buffer.get_start_iter()
+            end = tab.buffer.get_end_iter()
+            content = tab.buffer.get_text(start, end, True)
 
-        # Check size
-        file_size = os.path.getsize(tab.local_path)
-        max_mb = self.config.get('max_upload_size_mb', 5)
-        max_bytes = max_mb * 1024 * 1024
-        if file_size > max_bytes:
-            self._show_error(
-                "File Too Large",
-                f"File size: {file_size / 1024 / 1024:.2f} MB\n"
-                f"Max allowed: {max_mb} MB\n\n"
-                f"Adjust the limit in the connection settings."
-            )
-            return
+            with open(tab.local_path, 'w') as f:
+                f.write(content)
 
-        self._set_status(f"Uploading {tab.remote_path}...")
-        self._console_log(f"PUT {tab.remote_path} ({file_size / 1024:.1f} KB)")
-        self.item_save.set_sensitive(False)
+            file_size = os.path.getsize(tab.local_path)
+            max_mb = self.config.get('max_upload_size_mb', 5)
+            max_bytes = max_mb * 1024 * 1024
+            if file_size > max_bytes:
+                self._show_error(
+                    "File Too Large",
+                    f"File size: {file_size / 1024 / 1024:.2f} MB\n"
+                    f"Max allowed: {max_mb} MB\n\n"
+                    f"Adjust the limit in the connection settings."
+                )
+                return
 
-        def work():
-            try:
-                self.ftp_mgr.upload(tab.remote_path, tab.local_path, max_mb)
-                GLib.idle_add(self._on_upload_done, tab, page_num)
-            except Exception as e:
-                GLib.idle_add(self._on_upload_failed, str(e))
+            self._set_status(f"Uploading {tab.remote_path}...")
+            self._console_log(f"PUT {tab.remote_path} ({file_size / 1024:.1f} KB)")
+            self.item_save.set_sensitive(False)
 
-        threading.Thread(target=work, daemon=True).start()
+            def work():
+                try:
+                    self.ftp_mgr.upload(tab.remote_path, tab.local_path, max_mb)
+                    GLib.idle_add(self._on_upload_done, tab, page_num)
+                except Exception as e:
+                    GLib.idle_add(self._on_upload_failed, str(e))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        # If called from bg thread, schedule on main thread
+        if threading.current_thread() is not threading.main_thread():
+            GLib.idle_add(_prepare_and_upload)
+        else:
+            _prepare_and_upload()
+
+    def _on_switch_connected(self, vals):
+        """Update UI after auto-switching server connection."""
+        self.current_server_guid = vals.get('server_guid', '')
+        self.config['last_server'] = vals.get('server_guid', '')
+        save_config(self.config)
+
+        proto_label = vals.get('protocol', 'sftp').upper()
+        server_name = vals.get('server_name', '')
+        if server_name:
+            self.header.set_subtitle(f"[{server_name}] {proto_label}: {vals['username']}@{vals['host']}")
+        else:
+            self.header.set_subtitle(f"{proto_label}: {vals['username']}@{vals['host']}")
+        self.btn_connect.set_sensitive(False)
+        self.btn_disconnect.set_sensitive(True)
+        self.btn_refresh.set_sensitive(True)
+        self._console_log(
+            f"Switched to {vals['username']}@{vals['host']}", 'success')
+        # Reload the file tree for the new server
+        start_dir = vals.get('home_directory', '').strip()
+        if not start_dir and self.ftp_mgr:
+            start_dir = self.ftp_mgr.home_dir
+        if start_dir:
+            self._load_tree(start_dir)
 
     def _on_upload_done(self, tab, page_num):
         tab.buffer.set_modified(False)
