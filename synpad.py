@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.2"
+APP_VERSION = "1.10.3"
 DEBUG_MODE = False
 
 import gi
@@ -1374,6 +1374,10 @@ class SynPadWindow(Gtk.Window):
         item_xml = Gtk.MenuItem(label="Pretty Print XML")
         item_xml.connect('activate', lambda _: self._on_pretty_print_xml())
         menu.append(item_xml)
+
+        item_compare = Gtk.MenuItem(label="Compare Tabs")
+        item_compare.connect('activate', lambda _: self._on_compare_tabs())
+        menu.append(item_compare)
 
         menu.append(Gtk.SeparatorMenuItem())
 
@@ -4222,6 +4226,145 @@ class SynPadWindow(Gtk.Window):
             self._set_status("XML formatted")
         except Exception as e:
             self._show_error("XML Error", f"Invalid XML:\n\n{e}")
+
+    def _on_compare_tabs(self):
+        """Compare two open tabs side by side with diff highlighting."""
+        if len(self.tabs) < 2:
+            self._show_error("Compare", "Need at least 2 open tabs to compare.")
+            return
+
+        # Pick two tabs dialog
+        dlg = Gtk.Dialog(
+            title="Compare Tabs",
+            transient_for=self,
+            modal=True,
+            use_header_bar=False,
+        )
+        dlg.set_default_size(350, -1)
+
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+
+        box.pack_start(Gtk.Label(label="Select two tabs to compare:",
+                                 halign=Gtk.Align.START), False, False, 0)
+
+        grid = Gtk.Grid(column_spacing=8, row_spacing=6)
+        grid.attach(Gtk.Label(label="Left:", halign=Gtk.Align.END), 0, 0, 1, 1)
+        combo_a = Gtk.ComboBoxText()
+        grid.attach(combo_a, 1, 0, 1, 1)
+
+        grid.attach(Gtk.Label(label="Right:", halign=Gtk.Align.END), 0, 1, 1, 1)
+        combo_b = Gtk.ComboBoxText()
+        grid.attach(combo_b, 1, 1, 1, 1)
+
+        for page_num, tab in sorted(self.tabs.items()):
+            name = os.path.basename(tab.remote_path)
+            combo_a.append(str(page_num), name)
+            combo_b.append(str(page_num), name)
+
+        # Pre-select current tab as left
+        current = self.notebook.get_current_page()
+        combo_a.set_active_id(str(current))
+
+        box.pack_start(grid, False, False, 0)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_cancel = Gtk.Button(label="Cancel")
+        btn_cancel.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.CANCEL))
+        btn_row.pack_end(btn_cancel, False, False, 0)
+        btn_compare = Gtk.Button(label="Compare")
+        btn_compare.get_style_context().add_class('suggested-action')
+        btn_compare.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
+        btn_row.pack_end(btn_compare, False, False, 0)
+        box.pack_start(btn_row, False, False, 0)
+
+        dlg.show_all()
+        resp = dlg.run()
+
+        if resp == Gtk.ResponseType.OK:
+            id_a = combo_a.get_active_id()
+            id_b = combo_b.get_active_id()
+            dlg.destroy()
+            if id_a is None or id_b is None:
+                return
+            if id_a == id_b:
+                self._show_error("Compare", "Please select two different tabs.")
+                return
+            tab_a = self.tabs.get(int(id_a))
+            tab_b = self.tabs.get(int(id_b))
+            if tab_a and tab_b:
+                self._show_diff(tab_a, tab_b)
+        else:
+            dlg.destroy()
+
+    def _show_diff(self, tab_a, tab_b):
+        """Show a diff window comparing two tabs."""
+        import difflib
+
+        buf_a = tab_a.buffer
+        buf_b = tab_b.buffer
+        text_a = buf_a.get_text(buf_a.get_start_iter(), buf_a.get_end_iter(), True)
+        text_b = buf_b.get_text(buf_b.get_start_iter(), buf_b.get_end_iter(), True)
+
+        name_a = os.path.basename(tab_a.remote_path)
+        name_b = os.path.basename(tab_b.remote_path)
+
+        lines_a = text_a.splitlines(keepends=True)
+        lines_b = text_b.splitlines(keepends=True)
+
+        diff = list(difflib.unified_diff(lines_a, lines_b,
+                                         fromfile=name_a, tofile=name_b,
+                                         lineterm=''))
+
+        if not diff:
+            self._show_info("Compare", f"'{name_a}' and '{name_b}' are identical.")
+            return
+
+        # Show diff in a new window
+        win = Gtk.Window(
+            title=f"Diff: {name_a} vs {name_b}",
+            transient_for=self,
+            destroy_with_parent=True,
+        )
+        win.set_default_size(800, 600)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+
+        text_buf = Gtk.TextBuffer()
+
+        # Create tags for diff coloring
+        text_buf.create_tag('header', foreground='#3465a4', weight=700)
+        text_buf.create_tag('hunk', foreground='#75507b')
+        text_buf.create_tag('added', foreground='#4e9a06', background='#e8fce8')
+        text_buf.create_tag('removed', foreground='#cc0000', background='#fce8e8')
+        text_buf.create_tag('context', foreground='#555753')
+
+        for line in diff:
+            end = text_buf.get_end_iter()
+            if line.startswith('---') or line.startswith('+++'):
+                text_buf.insert_with_tags_by_name(end, line + '\n', 'header')
+            elif line.startswith('@@'):
+                text_buf.insert_with_tags_by_name(end, line + '\n', 'hunk')
+            elif line.startswith('+'):
+                text_buf.insert_with_tags_by_name(end, line + '\n', 'added')
+            elif line.startswith('-'):
+                text_buf.insert_with_tags_by_name(end, line + '\n', 'removed')
+            else:
+                text_buf.insert_with_tags_by_name(end, line + '\n', 'context')
+
+        text_view = Gtk.TextView(buffer=text_buf)
+        text_view.set_editable(False)
+        text_view.set_cursor_visible(False)
+        text_view.set_monospace(True)
+
+        scroll.add(text_view)
+        win.add(scroll)
+        win.show_all()
 
     def _on_goto_line(self):
         """Show a small dialog to jump to a line number."""
