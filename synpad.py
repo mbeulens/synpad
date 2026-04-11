@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.8.11"
+APP_VERSION = "1.8.12"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -2658,6 +2658,85 @@ class SynPadWindow(Gtk.Window):
 
     # -- File Tree ------------------------------------------------------------
 
+    def _load_tree_and_expand(self, target_dir, vals):
+        """Load the tree starting from home, then expand down to target_dir."""
+        start_dir = vals.get('home_directory', '').strip()
+        if not start_dir and self.ftp_mgr:
+            start_dir = self.ftp_mgr.home_dir
+        if not start_dir:
+            start_dir = '/'
+
+        # If the target dir is the same as or under home, we need to
+        # load home first, then expand each segment
+        self._expand_target = target_dir
+        self._expand_segments = []
+
+        # Build the list of directories to expand from home to target
+        if target_dir.startswith(start_dir):
+            relative = target_dir[len(start_dir):].strip('/')
+            if relative:
+                self._expand_segments = relative.split('/')
+        self._expand_home = start_dir
+
+        self._set_status(f"Navigating to {target_dir}...")
+        self._load_tree(start_dir)
+
+        # After tree loads, start expanding segments
+        if self._expand_segments:
+            # We hook into _populate_tree completion via idle_add chain
+            GLib.timeout_add(500, self._expand_next_segment)
+
+    def _expand_next_segment(self):
+        """Expand the next directory segment in the tree."""
+        if not self._expand_segments:
+            return False  # stop the chain
+
+        segment = self._expand_segments.pop(0)
+
+        # Find the segment in the tree
+        def _find_and_expand(parent_iter=None):
+            model = self.tree_store
+            if parent_iter:
+                child = model.iter_children(parent_iter)
+            else:
+                child = model.get_iter_first()
+
+            while child:
+                name = model[child][0]
+                is_dir = model[child][3]
+                if is_dir and name == segment:
+                    path = model.get_path(child)
+                    self.tree_view.expand_row(path, False)
+                    # If more segments, wait for the expand to load then continue
+                    if self._expand_segments:
+                        GLib.timeout_add(500, self._expand_next_segment)
+                    return
+                child = model.iter_next(child)
+
+        # Search from root or find the deepest expanded node
+        _find_and_expand(self._find_expanded_parent())
+        return False
+
+    def _find_expanded_parent(self):
+        """Find the deepest expanded tree iter matching the path so far."""
+        path_so_far = self._expand_home
+        model = self.tree_store
+        parent = None
+        it = model.get_iter_first()
+
+        while it:
+            full_path = model[it][2]
+            is_dir = model[it][3]
+            if is_dir and self._expand_target.startswith(full_path + '/'):
+                tree_path = model.get_path(it)
+                if self.tree_view.row_expanded(tree_path):
+                    parent = it
+                    it = model.iter_children(it)
+                    continue
+            it = model.iter_next(it)
+
+        return parent
+
     def _load_tree(self, path, parent_iter=None):
         self._set_status(f"Loading {path}...")
         self._console_log(f"LIST {path}")
@@ -3692,8 +3771,8 @@ class SynPadWindow(Gtk.Window):
         if self._pending_upload:
             tab, page_num, max_mb = self._pending_upload
             self._pending_upload = None
-            # Upload, and reload tree after upload completes
-            self._pending_tree_reload = vals
+            # Upload, and reload tree to the file's directory after upload completes
+            self._pending_tree_reload = (vals, tab.remote_path)
             self._do_upload(tab, page_num, max_mb)
         else:
             # No pending upload — just reload tree
@@ -3710,15 +3789,20 @@ class SynPadWindow(Gtk.Window):
         self._set_status(f"Uploaded {tab.remote_path} ({size_kb:.1f} KB)")
         self._console_log(f"PUT OK {tab.remote_path} ({size_kb:.1f} KB)", 'success')
 
-        # If there's a pending tree reload (from server switch), do it now
-        if hasattr(self, '_pending_tree_reload') and self._pending_tree_reload:
-            vals = self._pending_tree_reload
+        # If there's a pending tree reload (from server switch), navigate
+        # to the directory containing the uploaded file
+        if self._pending_tree_reload:
+            vals, remote_path = self._pending_tree_reload
             self._pending_tree_reload = None
-            start_dir = vals.get('home_directory', '').strip()
-            if not start_dir and self.ftp_mgr:
-                start_dir = self.ftp_mgr.home_dir
-            if start_dir:
-                self._load_tree(start_dir)
+            file_dir = os.path.dirname(remote_path)
+            if file_dir:
+                self._load_tree_and_expand(file_dir, vals)
+            else:
+                start_dir = vals.get('home_directory', '').strip()
+                if not start_dir and self.ftp_mgr:
+                    start_dir = self.ftp_mgr.home_dir
+                if start_dir:
+                    self._load_tree(start_dir)
 
     def _on_upload_failed(self, err):
         self.item_save.set_sensitive(True)
