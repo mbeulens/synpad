@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.10"
+APP_VERSION = "1.11.11"
 DEBUG_MODE = False
 
 import gi
@@ -3877,21 +3877,22 @@ class SynPadWindow(Gtk.Window):
         def work():
             try:
                 # Check if file was modified on server since we opened it
-                # Session-restored tabs have no stats — always check those
                 no_stats = (tab.remote_mtime is None and tab.remote_hash is None)
-
-                # Step 1: fast mtime check
                 file_changed = False
+                mtime_changed = False
+
+                # Step 1: fast mtime check (informational)
                 if tab.remote_mtime is not None:
                     current_mtime = mgr.get_remote_mtime(tab.remote_path)
                     if current_mtime and current_mtime > tab.remote_mtime:
-                        self._debug(f"Server mtime changed: {tab.remote_mtime} -> {current_mtime}")
-                        file_changed = True
+                        self._console_log(f"COMPARE mtime changed: {tab.remote_mtime} -> {current_mtime}")
+                        mtime_changed = True
+                    else:
+                        self._console_log(f"COMPARE mtime unchanged")
 
-                # Step 2: definitive hash check
-                # Runs when: mtime changed, mtime unavailable but hash exists, or no stats at all
+                # Step 2: definitive hash check — always runs
                 remote_content = None
-                if file_changed or (tab.remote_mtime is None and tab.remote_hash) or no_stats:
+                if True:
                     # Download remote file to temp for hash and compare
                     self._console_log(f"COMPARE GET {tab.remote_path}")
                     remote_tmp = tab.local_path + '.remote_tmp'
@@ -3936,8 +3937,6 @@ class SynPadWindow(Gtk.Window):
                             file_changed = False
                         # Store the hash now for future checks
                         tab.remote_hash = local_hash
-                else:
-                    self._console_log(f"COMPARE skipped — mtime unchanged")
 
                 if file_changed:
                     import queue
