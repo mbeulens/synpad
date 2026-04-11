@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.1"
+APP_VERSION = "1.11.2"
 DEBUG_MODE = False
 
 import gi
@@ -408,11 +408,6 @@ class ConnectDialog(Gtk.Dialog):
         self.btn_save_server.connect('clicked', self._on_save_server)
         server_box.pack_start(self.btn_save_server, False, False, 0)
 
-        self.btn_rename_server = Gtk.Button(label="Rename")
-        self.btn_rename_server.set_tooltip_text("Rename selected server profile")
-        self.btn_rename_server.connect('clicked', self._on_rename_server)
-        server_box.pack_start(self.btn_rename_server, False, False, 0)
-
         self.btn_delete_server = Gtk.Button(label="Delete")
         self.btn_delete_server.set_tooltip_text("Delete selected server profile")
         self.btn_delete_server.connect('clicked', self._on_delete_server)
@@ -423,6 +418,16 @@ class ConnectDialog(Gtk.Dialog):
 
         # Separator
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, row, 2, 1)
+        row += 1
+
+        # Profile name
+        grid.attach(Gtk.Label(label="Profile name:", halign=Gtk.Align.END), 0, row, 1, 1)
+        self.name_entry = Gtk.Entry(
+            hexpand=True,
+            placeholder_text="e.g. My Production Server",
+        )
+        self.name_entry.set_activates_default(True)
+        grid.attach(self.name_entry, 1, row, 1, 1)
         row += 1
 
         # Protocol selector
@@ -553,6 +558,7 @@ class ConnectDialog(Gtk.Dialog):
         srv = find_server_by_guid(self.config, server_id)
         if srv:
             self._loading_server = True
+            self.name_entry.set_text(srv.get('name', ''))
             self.proto_combo.set_active_id(srv.get('protocol', 'sftp'))
             self.host_entry.set_text(srv.get('host', ''))
             self.port_entry.set_value(srv.get('port', 22))
@@ -567,47 +573,16 @@ class ConnectDialog(Gtk.Dialog):
             self._loading_server = False
 
     def _on_save_server(self, _btn):
-        """Save current fields as a named server profile."""
+        """Save current fields as a server profile using the name field."""
+        name = self.name_entry.get_text().strip()
+        if not name:
+            # Auto-fill from host if empty
+            name = self.host_entry.get_text().strip()
+            if not name:
+                return
+            self.name_entry.set_text(name)
+
         current_id = self.server_combo.get_active_id()
-        # Suggest the current server name or host as default
-        default_name = ''
-        if current_id and current_id != '__new__':
-            srv = find_server_by_guid(self.config, current_id)
-            if srv:
-                default_name = srv['name']
-        elif self.host_entry.get_text().strip():
-            default_name = self.host_entry.get_text().strip()
-
-        dlg = Gtk.Dialog(
-            title="Save Server",
-            transient_for=self,
-            modal=True,
-        )
-        dlg.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_SAVE, Gtk.ResponseType.OK,
-        )
-        dlg.set_default_response(Gtk.ResponseType.OK)
-        content = dlg.get_content_area()
-        content.set_spacing(8)
-        content.set_margin_start(12)
-        content.set_margin_end(12)
-        content.set_margin_top(12)
-        content.set_margin_bottom(12)
-        content.add(Gtk.Label(label="Server name:", halign=Gtk.Align.START))
-        name_entry = Gtk.Entry(text=default_name)
-        name_entry.set_activates_default(True)
-        content.add(name_entry)
-        dlg.show_all()
-
-        resp = dlg.run()
-        name = name_entry.get_text().strip()
-        dlg.destroy()
-
-        if resp != Gtk.ResponseType.OK or not name:
-            return
-
-        # If editing an existing server, update it; otherwise create new
         existing_guid = None
         if current_id and current_id != '__new__':
             existing_guid = current_id
@@ -632,7 +607,6 @@ class ConnectDialog(Gtk.Dialog):
                 if srv.get('guid') == existing_guid:
                     servers[i] = profile
                     break
-            # Rebuild combo to update the display name
             self._rebuild_server_combo()
         else:
             servers.append(profile)
@@ -670,50 +644,6 @@ class ConnectDialog(Gtk.Dialog):
         self._rebuild_server_combo()
         self.server_combo.set_active_id('__new__')
 
-    def _on_rename_server(self, _btn):
-        """Rename the currently selected server profile."""
-        server_id = self.server_combo.get_active_id()
-        if server_id == '__new__' or server_id is None:
-            return
-
-        srv = find_server_by_guid(self.config, server_id)
-        if not srv:
-            return
-
-        dlg = Gtk.Dialog(
-            title="Rename Server",
-            transient_for=self,
-            modal=True,
-        )
-        dlg.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_OK, Gtk.ResponseType.OK,
-        )
-        dlg.set_default_response(Gtk.ResponseType.OK)
-        content = dlg.get_content_area()
-        content.set_spacing(8)
-        content.set_margin_start(12)
-        content.set_margin_end(12)
-        content.set_margin_top(12)
-        content.set_margin_bottom(12)
-        content.add(Gtk.Label(label="New name:", halign=Gtk.Align.START))
-        name_entry = Gtk.Entry(text=srv['name'])
-        name_entry.set_activates_default(True)
-        content.add(name_entry)
-        dlg.show_all()
-
-        resp = dlg.run()
-        new_name = name_entry.get_text().strip()
-        dlg.destroy()
-
-        if resp != Gtk.ResponseType.OK or not new_name:
-            return
-
-        srv['name'] = new_name
-        save_config(self.config)
-        self._rebuild_server_combo()
-        self.server_combo.set_active_id(server_id)
-
     def _rebuild_server_combo(self):
         """Rebuild the server dropdown from config."""
         self.server_combo.remove_all()
@@ -725,8 +655,6 @@ class ConnectDialog(Gtk.Dialog):
         server_id = self.server_combo.get_active_id()
         is_saved = server_id is not None and server_id != '__new__'
         self.btn_delete_server.set_sensitive(is_saved)
-        self.btn_rename_server.set_sensitive(is_saved
-        )
 
     def _on_protocol_changed(self, combo):
         proto = combo.get_active_id()
@@ -767,7 +695,7 @@ class ConnectDialog(Gtk.Dialog):
         server_guid = server_id if server_id != '__new__' else ''
         srv = find_server_by_guid(self.config, server_guid) if server_guid else None
         return {
-            'server_name': srv['name'] if srv else '',
+            'server_name': self.name_entry.get_text().strip() or (srv['name'] if srv else ''),
             'server_guid': server_guid,
             'protocol': self.proto_combo.get_active_id(),
             'host': self.host_entry.get_text().strip(),
