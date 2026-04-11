@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -2434,8 +2434,13 @@ class SynPadWindow(Gtk.Window):
         if not self.ftp_mgr or not self.ftp_mgr.connected:
             return False
 
-        # Get the clicked row
+        # Get the clicked row and select it
         path_info = self.tree_view.get_path_at_pos(int(event.x), int(event.y))
+
+        if path_info:
+            tree_path = path_info[0]
+            self.tree_view.get_selection().select_path(tree_path)
+            self.tree_view.set_cursor(tree_path, None, False)
 
         menu = Gtk.Menu()
 
