@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -1318,6 +1318,13 @@ class SynPadWindow(Gtk.Window):
         self.btn_theme.set_tooltip_text("Toggle light/dark theme")
         toolbar.pack_end(self.btn_theme)
 
+        self.btn_console = Gtk.Button()
+        self.btn_console.set_image(Gtk.Image.new_from_icon_name(
+            'utilities-terminal-symbolic', Gtk.IconSize.BUTTON))
+        self.btn_console.set_relief(Gtk.ReliefStyle.NONE)
+        self.btn_console.set_tooltip_text("Toggle console")
+        toolbar.pack_end(self.btn_console)
+
         # --- Build the three panes as independent widgets ---
 
         # 1) Symbol / function list pane
@@ -1445,7 +1452,62 @@ class SynPadWindow(Gtk.Window):
         self._inner_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self._outer_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self._outer_paned.pack2(self._inner_paned, resize=True, shrink=True)
-        vbox.pack_start(self._outer_paned, True, True, 0)
+
+        # Vertical paned: top = editor panes, bottom = console
+        self._main_vpaned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
+        self._main_vpaned.pack1(self._outer_paned, resize=True, shrink=True)
+
+        # Console pane
+        console_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        console_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        console_header.set_margin_start(6)
+        console_header.set_margin_end(6)
+        console_header.set_margin_top(2)
+        console_header.set_margin_bottom(2)
+
+        lbl = Gtk.Label()
+        lbl.set_markup("<b>Console</b>")
+        console_header.pack_start(lbl, False, False, 0)
+
+        btn_clear_console = Gtk.Button()
+        btn_clear_console.set_image(Gtk.Image.new_from_icon_name(
+            'edit-clear-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        btn_clear_console.set_relief(Gtk.ReliefStyle.NONE)
+        btn_clear_console.set_tooltip_text("Clear console")
+        btn_clear_console.connect('clicked', self._on_clear_console)
+        console_header.pack_end(btn_clear_console, False, False, 0)
+
+        console_box.pack_start(console_header, False, False, 0)
+        console_box.pack_start(
+            Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        self._console_scroll = Gtk.ScrolledWindow()
+        self._console_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+
+        self._console_buffer = Gtk.TextBuffer()
+        self._console_view = Gtk.TextView(buffer=self._console_buffer)
+        self._console_view.set_editable(False)
+        self._console_view.set_cursor_visible(False)
+        self._console_view.set_monospace(True)
+        self._console_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self._console_view.get_style_context().add_class('console-view')
+
+        # Tag for timestamps
+        self._console_buffer.create_tag('timestamp', foreground='#888888')
+        self._console_buffer.create_tag('error', foreground='#ef2929')
+        self._console_buffer.create_tag('success', foreground='#8ae234')
+
+        self._console_scroll.add(self._console_view)
+        console_box.pack_start(self._console_scroll, True, True, 0)
+
+        self._console_pane = console_box
+        self._main_vpaned.pack2(self._console_pane, resize=False, shrink=True)
+
+        vbox.pack_start(self._main_vpaned, True, True, 0)
+
+        # Console starts hidden
+        self._console_visible = False
+        self._console_pane.set_no_show_all(True)
 
         # Apply saved order
         self._apply_pane_layout()
@@ -1474,6 +1536,10 @@ class SynPadWindow(Gtk.Window):
         }
         .pane-header:hover {
             background-color: shade(@theme_bg_color, 1.1);
+        }
+        .console-view {
+            font-family: "Source Code Pro", "DejaVu Sans Mono", "Consolas", monospace;
+            font-size: 11px;
         }
         """
         provider = Gtk.CssProvider()
@@ -1729,6 +1795,44 @@ class SynPadWindow(Gtk.Window):
             'gtk-application-prefer-dark-theme',
             self.config.get('dark_theme', True),
         )
+
+    # -- Console ---------------------------------------------------------------
+
+    def _on_toggle_console(self, *_args):
+        """Toggle the console pane visibility."""
+        self._console_visible = not self._console_visible
+        if self._console_visible:
+            self._console_pane.set_no_show_all(False)
+            self._console_pane.show_all()
+            self._console_pane.set_no_show_all(True)
+            # Set a reasonable split — console gets ~200px
+            alloc = self._main_vpaned.get_allocation()
+            self._main_vpaned.set_position(alloc.height - 200)
+        else:
+            self._console_pane.set_visible(False)
+
+    def _on_clear_console(self, *_args):
+        """Clear the console output."""
+        self._console_buffer.set_text('')
+
+    def _console_log(self, message, tag=None):
+        """Append a timestamped message to the console. Thread-safe via idle_add."""
+        def _do_log():
+            import datetime
+            ts = datetime.datetime.now().strftime('%H:%M:%S')
+            end = self._console_buffer.get_end_iter()
+            self._console_buffer.insert_with_tags_by_name(end, f"[{ts}] ", 'timestamp')
+            end = self._console_buffer.get_end_iter()
+            if tag:
+                self._console_buffer.insert_with_tags_by_name(end, f"{message}\n", tag)
+            else:
+                self._console_buffer.insert(end, f"{message}\n")
+            # Auto-scroll to bottom
+            end = self._console_buffer.get_end_iter()
+            self._console_view.scroll_to_iter(end, 0.0, False, 0.0, 0.0)
+            return False
+
+        GLib.idle_add(_do_log)
 
     def _on_pick_scheme(self, _item):
         """Dialog to pick a GtkSourceView color scheme."""
@@ -2151,6 +2255,7 @@ class SynPadWindow(Gtk.Window):
         self.btn_refresh.connect('clicked', self._on_refresh)
         self.quick_combo.connect('changed', self._on_quick_connect)
         self.btn_theme.connect('clicked', self._on_toggle_theme)
+        self.btn_console.connect('clicked', self._on_toggle_console)
         self.tree_view.connect('row-activated', self._on_tree_row_activated)
         self.tree_view.connect('row-expanded', self._on_tree_row_expanded)
         self.tree_view.connect('button-press-event', self._on_tree_right_click)
@@ -2262,6 +2367,7 @@ class SynPadWindow(Gtk.Window):
     def _do_connect(self, vals):
         protocol = vals.get('protocol', 'sftp')
         self._set_status(f"Connecting via {protocol.upper()} to {vals['host']}...")
+        self._console_log(f"{protocol.upper()} CONNECT {vals['username']}@{vals['host']}:{vals['port']}")
         self.btn_connect.set_sensitive(False)
 
         def work():
@@ -2310,6 +2416,7 @@ class SynPadWindow(Gtk.Window):
         self.item_save.set_sensitive(True)
         self.btn_refresh.set_sensitive(True)
         self._set_status("Connected")
+        self._console_log(f"Connected to {vals['host']} — home: {self.ftp_mgr.home_dir}", 'success')
         # Use manual home dir if set, otherwise auto-detected from server
         start_dir = vals.get('home_directory', '').strip()
         if not start_dir:
@@ -2319,10 +2426,12 @@ class SynPadWindow(Gtk.Window):
     def _on_connect_failed(self, err):
         self.btn_connect.set_sensitive(True)
         self._set_status("Connection failed")
+        self._console_log(f"Connection failed: {err}", 'error')
         self._show_error("Connection Failed", err)
 
     def _on_disconnect(self, _btn):
         if self.ftp_mgr:
+            self._console_log("DISCONNECT")
             self.ftp_mgr.disconnect()
             self.ftp_mgr = None
         self.tree_store.clear()
@@ -2337,12 +2446,15 @@ class SynPadWindow(Gtk.Window):
 
     def _load_tree(self, path, parent_iter=None):
         self._set_status(f"Loading {path}...")
+        self._console_log(f"LIST {path}")
 
         def work():
             try:
                 entries = self.ftp_mgr.list_dir(path)
+                self._console_log(f"LIST {path} — {len(entries)} items")
                 GLib.idle_add(self._populate_tree, path, parent_iter, entries)
             except Exception as e:
+                self._console_log(f"LIST FAILED {path}: {e}", 'error')
                 GLib.idle_add(self._set_status, f"Error listing {path}: {e}")
 
         threading.Thread(target=work, daemon=True).start()
@@ -2577,6 +2689,7 @@ class SynPadWindow(Gtk.Window):
 
     def _on_tree_file_created(self, parent_dir, parent_iter, remote_path):
         self._set_status(f"Created {remote_path}")
+        self._console_log(f"MKDIR/MKFILE {remote_path}", 'success')
         # Refresh the parent directory
         if parent_iter:
             self.tree_store[parent_iter][4] = False  # mark as not loaded
@@ -2739,9 +2852,11 @@ class SynPadWindow(Gtk.Window):
                 self.ftp_mgr.chmod(remote_path, new_mode)
                 GLib.idle_add(self._set_status,
                               f"Permissions set: {name} → {oct(new_mode)}")
+                self._console_log(f"CHMOD {oct(new_mode)} {remote_path}", 'success')
             except Exception as e:
                 GLib.idle_add(self._show_error, "Permission Error", str(e))
                 GLib.idle_add(self._set_status, "Permission update failed")
+                self._console_log(f"CHMOD FAILED {remote_path}: {e}", 'error')
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2795,6 +2910,7 @@ class SynPadWindow(Gtk.Window):
                 break
 
         self._set_status(f"Renamed to {new_path}")
+        self._console_log(f"RENAME {old_path} → {new_path}", 'success')
 
     def _on_tree_delete_file(self, remote_path, tree_iter):
         """Delete a file from the server."""
@@ -2833,6 +2949,7 @@ class SynPadWindow(Gtk.Window):
         """Remove the deleted item from the tree."""
         self.tree_store.remove(tree_iter)
         self._set_status(f"Deleted {remote_path}")
+        self._console_log(f"DELETE {remote_path}", 'success')
 
         # Close any open tab for this file
         for page_num, tab in list(self.tabs.items()):
@@ -2850,6 +2967,7 @@ class SynPadWindow(Gtk.Window):
                 return
 
         self._set_status(f"Downloading {remote_path}...")
+        self._console_log(f"GET {remote_path}")
         filename = os.path.basename(remote_path)
         local_path = os.path.join(self.tmp_dir, filename.replace('/', '_') + f'_{id(remote_path)}')
 
@@ -3223,6 +3341,7 @@ class SynPadWindow(Gtk.Window):
             return
 
         self._set_status(f"Uploading {tab.remote_path}...")
+        self._console_log(f"PUT {tab.remote_path} ({file_size / 1024:.1f} KB)")
         self.item_save.set_sensitive(False)
 
         def work():
@@ -3239,10 +3358,12 @@ class SynPadWindow(Gtk.Window):
         self.item_save.set_sensitive(True)
         size_kb = os.path.getsize(tab.local_path) / 1024
         self._set_status(f"Uploaded {tab.remote_path} ({size_kb:.1f} KB)")
+        self._console_log(f"PUT OK {tab.remote_path} ({size_kb:.1f} KB)", 'success')
 
     def _on_upload_failed(self, err):
         self.item_save.set_sensitive(True)
         self._set_status("Upload failed")
+        self._console_log(f"PUT FAILED: {err}", 'error')
         self._show_error("Upload Failed", err)
 
     # -- Refresh --------------------------------------------------------------
