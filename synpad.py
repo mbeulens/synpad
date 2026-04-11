@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 
 import gi
 gi.require_version('Gtk', '3.0')

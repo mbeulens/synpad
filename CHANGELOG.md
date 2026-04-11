@@ -1,0 +1,112 @@
+# Changelog
+
+All notable changes to SynPad are documented in this file.
+
+Format follows [Keep a Changelog](https://keepachangelog.com/).
+
+## [1.9.0] - 2026-04-11
+
+### Added
+- Collapsible console pane with FTP/SFTP command logging (connect, disconnect, list, get, put, mkdir, delete, rename, chmod)
+- Console: color-coded messages (green=success, red=error, gray=timestamps), reverse order (newest first), 500 line limit, clear button
+- Server profiles with GUIDs — rename freely without breaking references
+- Rename button in connection dialog for server profiles
+- Smart save — auto-switches server connection when saving a file that belongs to a different server
+- File tree auto-navigates to the uploaded file's directory after server switch
+- Session save/restore — all open tabs persist across restarts with content preserved
+- Docblock generation for PHP and JS/TS — type `/**` above a function and press Tab
+- Code completion for PHP and JS/TS with function signatures and type hints
+- Find window (Ctrl+F) with match case and regex checkboxes
+- Find & Replace window (Ctrl+R) with Replace and Replace All
+- Go to Line dialog (Ctrl+G)
+- JSON pretty print (menu item)
+- XML pretty print (menu item)
+- Open local file (Ctrl+O) with file type filters
+- Create new local file (Ctrl+N)
+- Smart Ctrl+S — saves locally for local files, uploads for remote files
+- Remote file management: create file, create directory, rename, delete (with confirmation), chmod
+- Right-click context menu on file tree with all file operations
+- Permissions dialog with checkbox grid and octal input for chmod
+- Right-click highlights the selected item in file tree
+- Version number in title bar (APP_VERSION)
+- Desktop launcher (.desktop file) with StartupWMClass
+
+### Fixed
+- Quick connect dropdown now updates after rename/save/delete in connection dialog
+- SFTP thread collision on auto-switch upload (serialized operations)
+- Empty file upload on server switch (content saved before switching)
+- NoneType errors after closing tabs during upload
+- Function list no longer shows `if`, `while`, `for` etc. as functions in JS
+- Symbol list click navigates to exact line (uses character offset)
+- No horizontal scroll when clicking function in symbol list
+- GTK widget realized warnings suppressed
+- GtkSourceView `#black` color validation
+- Markup escaping for `&`, `<`, `>` in completion signatures
+
+## [1.8.0] - 2026-04-11
+
+Initial GitHub release. All features from V0.1 through V1.0.0 consolidated.
+
+### Added
+- FTP connection with host, port, username, password
+- SFTP connection via paramiko with password and SSH key auth (RSA, Ed25519, ECDSA)
+- Remote file tree browser with lazy-loading directories on expand
+- Code editor with GtkSourceView syntax highlighting (PHP, JS, TS, Python, HTML, CSS, JSON, SQL, YAML, Markdown, and more)
+- Tab support for multiple open files with modified indicators
+- File size check before upload with configurable max size
+- Dark theme (oblivion) with monospace font
+- Credentials saved to ~/.config/synpad/config.json
+- Keyboard shortcuts: Ctrl+S (save/upload), Ctrl+W (close tab), Ctrl+Q (quit)
+- In-place file upload (sftp.open write) to avoid permission denied errors
+- FTP uses CWD + STOR for server compatibility
+- Auto-detect home directory (sftp.normalize('.') / ftp.pwd())
+- Manual home directory override in connection dialog
+- Server profiles with save/load/delete and quick connect dropdown
+- Function/symbol outline pane with click-to-navigate (PHP, JS, TS, Python)
+- Draggable resizable panes with arrow-button reordering
+- Dark/light theme toggle (full GTK + editor)
+- Multiple GtkSourceView color schemes with picker dialog
+- Custom color editor with per-element foreground, background, bold, italic
+- Save/load multiple custom color schemes
+- Tab right-click context menu: Close, Close All, Close All But This
+- Hamburger menu with all actions
+- Folder expand fix — no more glitch when clicking directories
+
+## Pre-release versions (archive)
+
+### V0.9 (V1.0.0 candidate)
+- Draggable pane reordering with persistent layout
+
+### V0.8
+- Custom color scheme editor with save/load
+- Fixed deprecation warnings
+
+### V0.7
+- Dark/light theme toggle for full application
+- Color scheme picker with live preview
+
+### V0.6
+- Hamburger menu with Settings, Save & Upload, Quit
+- Tab right-click context menu (Close, Close All, Close All But This)
+- Connection controls moved to Files pane
+
+### V0.5
+- Function/symbol outline pane (left side)
+- Removed layout swap button, fixed pane layout
+
+### V0.4
+- Arrow buttons to reorder panes
+- Fixed segfault on pane rearrangement
+
+### V0.3
+- SFTP support with SSH key authentication
+- Permission denied fix (in-place file write)
+- Folder expand glitch fix
+- Auto-detect home directory
+- Swappable layout (file tree left/right)
+
+### V0.2
+- Install script for dependencies
+
+### V0.1
+- Initial prototype: FTP connection, file tree, code editor with syntax highlighting
