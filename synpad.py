@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.12"
+APP_VERSION = "1.10.13"
 DEBUG_MODE = False
 
 import gi
@@ -4560,11 +4560,15 @@ class SynPadWindow(Gtk.Window):
         status.set_margin_bottom(4)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        # Top row: content + minimap
-        top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        top_row.pack_start(content_box, True, True, 0)
-        top_row.pack_end(minimap, False, False, 0)
-        outer.pack_start(top_row, True, True, 0)
+        # Top row: content (paned) + minimap (fixed width)
+        top_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        top_paned.pack1(content_box, resize=True, shrink=True)
+        # Minimap in a fixed-width box
+        minimap_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        minimap_box.set_size_request(34, -1)
+        minimap_box.pack_start(minimap, True, True, 0)
+        top_paned.pack2(minimap_box, resize=False, shrink=False)
+        outer.pack_start(top_paned, True, True, 0)
         outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
                          False, False, 0)
         outer.pack_start(status, False, False, 0)
