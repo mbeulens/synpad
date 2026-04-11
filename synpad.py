@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.5"
+APP_VERSION = "1.10.6"
 DEBUG_MODE = False
 
 import gi
@@ -4390,11 +4390,9 @@ class SynPadWindow(Gtk.Window):
         left_scroll.set_vadjustment(vadj)
 
         left_buf = Gtk.TextBuffer()
-        left_buf.create_tag('equal', background=None)
-        left_buf.create_tag('replace', background='#fff3c0')
-        left_buf.create_tag('delete', background='#fce8e8')
-        left_buf.create_tag('insert', background='#f0f0f0', foreground='#aaaaaa')
-        left_buf.create_tag('linenum', foreground='#888888')
+        left_buf.create_tag('replace', background='#806600', foreground='#ffffff')
+        left_buf.create_tag('delete', background='#990000', foreground='#ffffff')
+        left_buf.create_tag('insert', background='#333333', foreground='#888888')
 
         left_view = Gtk.TextView(buffer=left_buf)
         left_view.set_editable(False)
@@ -4418,11 +4416,9 @@ class SynPadWindow(Gtk.Window):
         right_scroll.set_vadjustment(vadj)
 
         right_buf = Gtk.TextBuffer()
-        right_buf.create_tag('equal', background=None)
-        right_buf.create_tag('replace', background='#fff3c0')
-        right_buf.create_tag('insert', background='#e8fce8')
-        right_buf.create_tag('delete', background='#f0f0f0', foreground='#aaaaaa')
-        right_buf.create_tag('linenum', foreground='#888888')
+        right_buf.create_tag('replace', background='#806600', foreground='#ffffff')
+        right_buf.create_tag('insert', background='#006600', foreground='#ffffff')
+        right_buf.create_tag('delete', background='#333333', foreground='#888888')
 
         right_view = Gtk.TextView(buffer=right_buf)
         right_view.set_editable(False)
@@ -4438,23 +4434,23 @@ class SynPadWindow(Gtk.Window):
         content_box.pack_start(right_box, True, True, 0)
 
         # --- Fill buffers ---
-        left_line_num = 0
-        right_line_num = 0
         for left_text, right_text, tag in diff_rows:
             # Left side
             end_l = left_buf.get_end_iter()
-            if tag == 'insert':
+            if tag == 'equal':
+                left_buf.insert(end_l, f"{left_text}\n")
+            elif tag == 'insert':
                 left_buf.insert_with_tags_by_name(end_l, '\n', tag)
             else:
-                left_line_num += 1
                 left_buf.insert_with_tags_by_name(end_l, f"{left_text}\n", tag)
 
             # Right side
             end_r = right_buf.get_end_iter()
-            if tag == 'delete':
+            if tag == 'equal':
+                right_buf.insert(end_r, f"{right_text}\n")
+            elif tag == 'delete':
                 right_buf.insert_with_tags_by_name(end_r, '\n', tag)
             else:
-                right_line_num += 1
                 right_buf.insert_with_tags_by_name(end_r, f"{right_text}\n", tag)
 
         # --- Change minimap (right edge) ---
@@ -4534,6 +4530,12 @@ class SynPadWindow(Gtk.Window):
 
         win.add(outer)
         win.show_all()
+
+        # Redraw minimap after window is fully laid out
+        def _init_minimap():
+            minimap.queue_draw()
+            return False
+        GLib.idle_add(_init_minimap)
 
     def _on_goto_line(self):
         """Show a small dialog to jump to a line number."""
