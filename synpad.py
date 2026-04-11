@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.9"
+APP_VERSION = "1.10.10"
 DEBUG_MODE = False
 
 import gi
@@ -4484,7 +4484,7 @@ class SynPadWindow(Gtk.Window):
 
         # --- Change minimap (right edge) ---
         minimap = Gtk.DrawingArea()
-        minimap.set_size_request(24, -1)
+        minimap.set_size_request(30, -1)
 
         def on_draw_minimap(widget, cr):
             alloc = widget.get_allocation()
@@ -4492,10 +4492,15 @@ class SynPadWindow(Gtk.Window):
             h = alloc.height
             if total_lines == 0:
                 return
-            # Background
-            cr.set_source_rgb(0.92, 0.92, 0.92)
+            # Background — darker to be visible
+            cr.set_source_rgb(0.75, 0.75, 0.75)
             cr.rectangle(0, 0, w, h)
             cr.fill()
+            # Border
+            cr.set_source_rgb(0.6, 0.6, 0.6)
+            cr.set_line_width(1)
+            cr.rectangle(0.5, 0.5, w - 1, h - 1)
+            cr.stroke()
             # Draw change marks
             for pos in change_positions:
                 y = int((pos / total_lines) * h)
@@ -4569,7 +4574,8 @@ class SynPadWindow(Gtk.Window):
         def _init_minimap():
             minimap.queue_draw()
             return False
-        GLib.idle_add(_init_minimap)
+        GLib.timeout_add(200, _init_minimap)
+        GLib.timeout_add(500, _init_minimap)
 
     def _on_goto_line(self):
         """Show a small dialog to jump to a line number."""
