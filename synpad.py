@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.15"
+APP_VERSION = "1.10.16"
 DEBUG_MODE = False
 
 import gi
@@ -4376,6 +4376,43 @@ class SynPadWindow(Gtk.Window):
         )
         win.set_default_size(1000, 700)
 
+        # De-duplicate change_positions to get unique change blocks
+        change_blocks = []
+        prev_pos = -2
+        for pos in change_positions:
+            if pos != prev_pos + 1:
+                change_blocks.append(pos)
+            prev_pos = pos
+        current_change = [0]
+
+        # --- Navigation toolbar ---
+        nav_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        nav_bar.set_margin_start(6)
+        nav_bar.set_margin_end(6)
+        nav_bar.set_margin_top(4)
+        nav_bar.set_margin_bottom(4)
+
+        btn_prev_change = Gtk.Button()
+        btn_prev_change.set_image(Gtk.Image.new_from_icon_name(
+            'go-up-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        btn_prev_change.set_relief(Gtk.ReliefStyle.NONE)
+        btn_prev_change.set_tooltip_text("Previous change")
+        nav_bar.pack_start(btn_prev_change, False, False, 0)
+
+        btn_next_change = Gtk.Button()
+        btn_next_change.set_image(Gtk.Image.new_from_icon_name(
+            'go-down-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        btn_next_change.set_relief(Gtk.ReliefStyle.NONE)
+        btn_next_change.set_tooltip_text("Next change")
+        nav_bar.pack_start(btn_next_change, False, False, 0)
+
+        change_label = Gtk.Label()
+        if change_blocks:
+            change_label.set_text(f"Change 1 of {len(change_blocks)}")
+        else:
+            change_label.set_text("No changes")
+        nav_bar.pack_start(change_label, False, False, 8)
+
         # Left + Right panes in a horizontal box with synced scrolling
         content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
 
@@ -4497,7 +4534,30 @@ class SynPadWindow(Gtk.Window):
         left_scroll.get_vadjustment().connect('value-changed', _sync_left_to_right)
         right_scroll.get_vadjustment().connect('value-changed', _sync_right_to_left)
 
-        # --- Change minimap (right edge) ---
+        # --- Navigation button handlers ---
+        def _goto_change(idx):
+            if not change_blocks:
+                return
+            idx = max(0, min(idx, len(change_blocks) - 1))
+            current_change[0] = idx
+            change_label.set_text(f"Change {idx + 1} of {len(change_blocks)}")
+            # Scroll to the change line
+            line = change_blocks[idx]
+            vadj = left_scroll.get_vadjustment()
+            if total_lines > 0 and vadj.get_upper() > 0:
+                fraction = line / total_lines
+                target = fraction * vadj.get_upper()
+                vadj.set_value(max(0, target - vadj.get_page_size() / 3))
+
+        def _on_prev_change(_btn):
+            _goto_change(current_change[0] - 1)
+
+        def _on_next_change(_btn):
+            _goto_change(current_change[0] + 1)
+
+        btn_prev_change.connect('clicked', _on_prev_change)
+        btn_next_change.connect('clicked', _on_next_change)
+
         # --- Change minimap using colored labels in a scrolled list ---
         minimap_box_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
@@ -4559,6 +4619,9 @@ class SynPadWindow(Gtk.Window):
         top_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         top_box.pack_start(content_box, True, True, 0)
         top_box.pack_start(minimap_scroll, False, False, 0)
+        outer.pack_start(nav_bar, False, False, 0)
+        outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
+                         False, False, 0)
         outer.pack_start(top_box, True, True, 0)
         outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
                          False, False, 0)
