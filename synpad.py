@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.16"
+APP_VERSION = "1.10.17"
 DEBUG_MODE = False
 
 import gi
@@ -4607,7 +4607,7 @@ class SynPadWindow(Gtk.Window):
 
         # Status bar with change count
         status = Gtk.Label()
-        changes = len(change_positions)
+        changes = len(change_blocks)
         status.set_markup(f"  <b>{changes}</b> change(s) found")
         status.set_halign(Gtk.Align.START)
         status.set_margin_start(8)
