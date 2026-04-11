@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.3"
+APP_VERSION = "1.11.4"
 DEBUG_MODE = False
 
 import gi
@@ -367,7 +367,7 @@ class SFTPManager:
 class ConnectDialog(Gtk.Dialog):
     """Dialog for entering FTP/SFTP connection details."""
 
-    def __init__(self, parent, config):
+    def __init__(self, parent, config, start_new=False):
         super().__init__(
             title="Connect to Server",
             transient_for=parent,
@@ -539,11 +539,14 @@ class ConnectDialog(Gtk.Dialog):
         self.server_combo.connect('changed', self._on_server_changed)
 
         # Select last used server or (New connection)
-        last = config.get('last_server', '')
-        if last and self.server_combo.set_active_id(last) is None:
+        if start_new:
             self.server_combo.set_active_id('__new__')
         else:
-            self.server_combo.set_active_id(last or '__new__')
+            last = config.get('last_server', '')
+            if last and self.server_combo.set_active_id(last) is None:
+                self.server_combo.set_active_id('__new__')
+            else:
+                self.server_combo.set_active_id(last or '__new__')
 
         self._update_sftp_fields()
         self._update_delete_btn()
@@ -1805,8 +1808,8 @@ class SynPadWindow(Gtk.Window):
                 'weather-clear-night-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
 
     def _on_open_settings(self, _item):
-        """Open the settings dialog (same as connect dialog for now)."""
-        dlg = ConnectDialog(self, self.config)
+        """Open the server manager dialog."""
+        dlg = ConnectDialog(self, self.config, start_new=True)
         resp = dlg.run()
         if resp == Gtk.ResponseType.OK:
             vals = dlg.get_values()
