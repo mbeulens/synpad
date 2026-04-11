@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.9.5"
+APP_VERSION = "1.9.6"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -3494,34 +3494,14 @@ class SynPadWindow(Gtk.Window):
 
     # -- Open Local File ------------------------------------------------------
 
-    def _on_new_local_file(self):
-        """Create a new local file via Save dialog, then open it."""
-        dlg = Gtk.FileChooserDialog(
-            title="New Local File",
-            transient_for=self,
-            action=Gtk.FileChooserAction.SAVE,
-        )
-        dlg.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_SAVE, Gtk.ResponseType.OK,
-        )
-        dlg.set_do_overwrite_confirmation(True)
-        dlg.set_current_name("untitled.php")
+    _untitled_counter = 0
 
-        resp = dlg.run()
-        if resp == Gtk.ResponseType.OK:
-            filepath = dlg.get_filename()
-            dlg.destroy()
-            # Create the empty file
-            try:
-                with open(filepath, 'w') as f:
-                    pass
-            except Exception as e:
-                self._show_error("Create Failed", str(e))
-                return
-            self._open_local_file(filepath)
-        else:
-            dlg.destroy()
+    def _on_new_local_file(self):
+        """Create a new untitled tab. File location chosen on first save."""
+        SynPadWindow._untitled_counter += 1
+        name = f"Untitled {self._untitled_counter}"
+        self._create_editor_tab(name, '', '', is_local=True)
+        self.item_save.set_sensitive(True)
 
     def _on_open_local_file(self):
         """Open a file from the local filesystem."""
@@ -3589,7 +3569,40 @@ class SynPadWindow(Gtk.Window):
             self._on_save_upload(None)
 
     def _on_save_local(self, tab):
-        """Save a local file to disk."""
+        """Save a local file to disk. If untitled, ask where to save first."""
+        # Untitled file — no path yet
+        if not tab.local_path:
+            dlg = Gtk.FileChooserDialog(
+                title="Save As",
+                transient_for=self,
+                action=Gtk.FileChooserAction.SAVE,
+            )
+            dlg.add_buttons(
+                Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                Gtk.STOCK_SAVE, Gtk.ResponseType.OK,
+            )
+            dlg.set_do_overwrite_confirmation(True)
+            dlg.set_current_name(tab.remote_path)  # "Untitled 1" etc.
+
+            resp = dlg.run()
+            if resp == Gtk.ResponseType.OK:
+                filepath = dlg.get_filename()
+                dlg.destroy()
+                tab.local_path = filepath
+                tab.remote_path = filepath
+                # Update tab label
+                page_widget = tab.source_view.get_parent()
+                tab_widget = self.notebook.get_tab_label(page_widget)
+                if tab_widget:
+                    tab_box = tab_widget.get_child()
+                    for child in tab_box.get_children():
+                        if isinstance(child, Gtk.Label):
+                            child.set_text(os.path.basename(filepath))
+                            break
+            else:
+                dlg.destroy()
+                return
+
         start = tab.buffer.get_start_iter()
         end = tab.buffer.get_end_iter()
         content = tab.buffer.get_text(start, end, True)
