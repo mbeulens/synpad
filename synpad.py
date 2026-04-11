@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.9.4"
+APP_VERSION = "1.9.5"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -4407,6 +4407,9 @@ class SynPadWindow(Gtk.Window):
         """Intercept keys on the source view before GtkSourceView handles them."""
         # Tab on /// or /** line → expand snippet
         if event.keyval == Gdk.KEY_Tab:
+            # Hide completion popup first so it doesn't consume the Tab
+            completion = _view.get_completion()
+            completion.hide()
             if self._try_expand_snippet(_view):
                 return True
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
