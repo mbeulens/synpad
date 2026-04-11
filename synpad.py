@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.11"
+APP_VERSION = "1.10.12"
 DEBUG_MODE = False
 
 import gi
@@ -4376,8 +4376,6 @@ class SynPadWindow(Gtk.Window):
         )
         win.set_default_size(1000, 700)
 
-        main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-
         # Left + Right panes in a horizontal box with synced scrolling
         content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
 
@@ -4552,12 +4550,6 @@ class SynPadWindow(Gtk.Window):
         minimap.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
         minimap.connect('button-press-event', on_minimap_click)
 
-        # Put minimap in a frame so it always has visible boundaries
-        minimap_frame = Gtk.Frame()
-        minimap_frame.add(minimap)
-        main_box.pack_start(content_box, True, True, 0)
-        main_box.pack_start(minimap_frame, False, False, 0)
-
         # Status bar with change count
         status = Gtk.Label()
         changes = len(change_positions)
@@ -4568,7 +4560,11 @@ class SynPadWindow(Gtk.Window):
         status.set_margin_bottom(4)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        outer.pack_start(main_box, True, True, 0)
+        # Top row: content + minimap
+        top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        top_row.pack_start(content_box, True, True, 0)
+        top_row.pack_end(minimap, False, False, 0)
+        outer.pack_start(top_row, True, True, 0)
         outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
                          False, False, 0)
         outer.pack_start(status, False, False, 0)
