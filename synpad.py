@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.8.7"
+APP_VERSION = "1.8.8"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -1850,7 +1850,8 @@ class SynPadWindow(Gtk.Window):
                 self.config['home_directory'] = vals.get('home_directory', '')
                 self.config['last_server'] = vals.get('server_guid', '')
                 save_config(self.config)
-                self._rebuild_quick_combo()
+        # Always rebuild quick connect — renames/saves/deletes may have happened
+        self._rebuild_quick_combo()
         dlg.destroy()
 
     def _on_toggle_theme(self, _btn):
@@ -2544,9 +2545,11 @@ class SynPadWindow(Gtk.Window):
         if resp == Gtk.ResponseType.OK:
             vals = dlg.get_values()
             dlg.destroy()
+            self._rebuild_quick_combo()
             self._do_connect(vals)
         else:
             dlg.destroy()
+            self._rebuild_quick_combo()
 
     def _do_connect(self, vals):
         protocol = vals.get('protocol', 'sftp')
