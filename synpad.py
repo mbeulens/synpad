@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.6"
+APP_VERSION = "1.10.7"
 DEBUG_MODE = False
 
 import gi
@@ -4390,9 +4390,9 @@ class SynPadWindow(Gtk.Window):
         left_scroll.set_vadjustment(vadj)
 
         left_buf = Gtk.TextBuffer()
-        left_buf.create_tag('replace', background='#806600', foreground='#ffffff')
-        left_buf.create_tag('delete', background='#990000', foreground='#ffffff')
-        left_buf.create_tag('insert', background='#333333', foreground='#888888')
+        left_buf.create_tag('replace', background='#edd400', foreground='#000000')
+        left_buf.create_tag('delete', background='#ef2929', foreground='#ffffff')
+        left_buf.create_tag('insert', background='#555753', foreground='#888a85')
 
         left_view = Gtk.TextView(buffer=left_buf)
         left_view.set_editable(False)
@@ -4416,9 +4416,9 @@ class SynPadWindow(Gtk.Window):
         right_scroll.set_vadjustment(vadj)
 
         right_buf = Gtk.TextBuffer()
-        right_buf.create_tag('replace', background='#806600', foreground='#ffffff')
-        right_buf.create_tag('insert', background='#006600', foreground='#ffffff')
-        right_buf.create_tag('delete', background='#333333', foreground='#888888')
+        right_buf.create_tag('replace', background='#edd400', foreground='#000000')
+        right_buf.create_tag('insert', background='#73d216', foreground='#000000')
+        right_buf.create_tag('delete', background='#555753', foreground='#888a85')
 
         right_view = Gtk.TextView(buffer=right_buf)
         right_view.set_editable(False)
