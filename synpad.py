@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.13"
+APP_VERSION = "1.10.14"
 DEBUG_MODE = False
 
 import gi
@@ -4481,74 +4481,52 @@ class SynPadWindow(Gtk.Window):
         right_scroll.get_vadjustment().connect('value-changed', _sync_right_to_left)
 
         # --- Change minimap (right edge) ---
-        minimap = Gtk.DrawingArea()
-        minimap.set_size_request(30, 100)
-        minimap.set_vexpand(True)
-        minimap.set_hexpand(False)
+        # --- Change minimap using colored labels in a scrolled list ---
+        minimap_box_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
-        def on_draw_minimap(widget, cr):
-            alloc = widget.get_allocation()
-            w = alloc.width
-            h = alloc.height
-            if total_lines == 0 or h < 2:
-                return False
-            # Background — darker to be visible
-            cr.set_source_rgb(0.75, 0.75, 0.75)
-            cr.rectangle(0, 0, w, h)
-            cr.fill()
-            # Border
-            cr.set_source_rgb(0.6, 0.6, 0.6)
-            cr.set_line_width(1)
-            cr.rectangle(0.5, 0.5, w - 1, h - 1)
-            cr.stroke()
-            # Draw change marks
-            for pos in change_positions:
-                y = int((pos / total_lines) * h)
-                tag = diff_rows[pos][2]
-                if tag == 'replace':
-                    cr.set_source_rgb(0.9, 0.75, 0.0)  # yellow
-                elif tag == 'delete':
-                    cr.set_source_rgb(0.85, 0.2, 0.2)  # red
-                elif tag == 'insert':
-                    cr.set_source_rgb(0.2, 0.65, 0.2)  # green
-                cr.rectangle(2, y, w - 4, max(2, h / total_lines))
-                cr.fill()
-            # Viewport indicator
+        # Build a colored bar for each line
+        colors = {'equal': None, 'replace': '#edd400', 'delete': '#ef2929', 'insert': '#73d216'}
+        minimap_labels = []
+        for i, (_, _, tag) in enumerate(diff_rows):
+            color = colors.get(tag)
+            if color:
+                lbl = Gtk.EventBox()
+                lbl.set_size_request(20, 2)
+                lbl.override_background_color(
+                    Gtk.StateFlags.NORMAL,
+                    Gdk.RGBA(*[c / 255.0 for c in bytes.fromhex(color[1:])], 1.0))
+                minimap_labels.append((i, lbl))
+                minimap_box_inner.pack_start(lbl, False, False, 0)
+            else:
+                spacer = Gtk.Box()
+                spacer.set_size_request(20, 2)
+                minimap_box_inner.pack_start(spacer, False, False, 0)
+
+        minimap_scroll = Gtk.ScrolledWindow()
+        minimap_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        minimap_scroll.set_size_request(28, -1)
+        minimap_scroll.add(minimap_box_inner)
+
+        # Click on minimap label scrolls to that line
+        for line_idx, lbl in minimap_labels:
+            lbl.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+            def _on_click(_w, _ev, idx=line_idx):
+                vadj = left_scroll.get_vadjustment()
+                if total_lines > 0 and vadj.get_upper() > 0:
+                    fraction = idx / total_lines
+                    target = fraction * vadj.get_upper()
+                    vadj.set_value(max(0, target - vadj.get_page_size() / 2))
+                return True
+            lbl.connect('button-press-event', _on_click)
+
+        # Sync minimap scroll with content scroll
+        def _sync_minimap(*_args):
             vadj = left_scroll.get_vadjustment()
-            upper = vadj.get_upper()
-            if upper > 0:
-                vp_start = vadj.get_value() / upper * h
-                vp_height = vadj.get_page_size() / upper * h
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.2)
-                cr.rectangle(0, vp_start, w, max(vp_height, 4))
-                cr.fill()
-                # Border for viewport
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.4)
-                cr.set_line_width(1)
-                cr.rectangle(0.5, vp_start + 0.5, w - 1, max(vp_height, 4) - 1)
-                cr.stroke()
-            return False
-
-        minimap.connect('draw', on_draw_minimap)
-
-        # Redraw minimap when scrolling
-        def on_scroll_changed(*_args):
-            minimap.queue_draw()
-        left_scroll.get_vadjustment().connect('value-changed', on_scroll_changed)
-
-        # Click on minimap to scroll
-        def on_minimap_click(widget, event):
-            alloc = widget.get_allocation()
-            vadj = left_scroll.get_vadjustment()
-            upper = vadj.get_upper()
-            if alloc.height > 0 and upper > 0:
-                fraction = event.y / alloc.height
-                target = fraction * upper
-                vadj.set_value(max(0, target - vadj.get_page_size() / 2))
-            return True
-
-        minimap.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-        minimap.connect('button-press-event', on_minimap_click)
+            madj = minimap_scroll.get_vadjustment()
+            if vadj.get_upper() > 0 and madj.get_upper() > 0:
+                fraction = vadj.get_value() / vadj.get_upper()
+                madj.set_value(fraction * madj.get_upper())
+        left_scroll.get_vadjustment().connect('value-changed', _sync_minimap)
 
         # Status bar with change count
         status = Gtk.Label()
@@ -4560,15 +4538,11 @@ class SynPadWindow(Gtk.Window):
         status.set_margin_bottom(4)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        # Top row: content (paned) + minimap (fixed width)
-        top_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        top_paned.pack1(content_box, resize=True, shrink=True)
-        # Minimap in a fixed-width box
-        minimap_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        minimap_box.set_size_request(34, -1)
-        minimap_box.pack_start(minimap, True, True, 0)
-        top_paned.pack2(minimap_box, resize=False, shrink=False)
-        outer.pack_start(top_paned, True, True, 0)
+        # Top row: content + minimap
+        top_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        top_box.pack_start(content_box, True, True, 0)
+        top_box.pack_start(minimap_scroll, False, False, 0)
+        outer.pack_start(top_box, True, True, 0)
         outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
                          False, False, 0)
         outer.pack_start(status, False, False, 0)
