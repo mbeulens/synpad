@@ -4,19 +4,37 @@ A lightweight PHP/JS IDE with FTP/SFTP integration for Linux, built with Python 
 
 ## Features
 
-- **FTP & SFTP** connection with server profiles and quick connect
-- **Syntax highlighting** for PHP, JS, TS, Python, HTML, CSS, JSON, SQL, and more
+### Editor
+- **Syntax highlighting** for PHP, JS, TS, Python, HTML, CSS, JSON, SQL, YAML, Markdown, and more
 - **Code completion** for PHP and JS/TS with function signatures and type hints
+- **Docblock generation** — type `/**` above a function and press Tab to auto-generate PHPDoc or JSDoc
 - **Function outline** pane with click-to-navigate
-- **Find & Replace** with regex support (Ctrl+F / Ctrl+R)
+- **Find & Replace** with match case and regex support (Ctrl+F / Ctrl+R)
 - **Go to Line** (Ctrl+G)
 - **JSON and XML** pretty print
-- **Remote file management** — create, rename, delete files/directories, chmod
-- **Local file editing** — open and save local files (Ctrl+O / Ctrl+N)
-- **Multiple color schemes** with custom color editor
-- **Dark/light theme** toggle
-- **Draggable panes** — rearrange function list, editor, and file tree
 - **Tab management** — right-click context menu with close, close all, close all but this
+- **Session persistence** — all open tabs restore on restart, including unsaved changes
+
+### Remote File Management
+- **FTP & SFTP** connection with SSH key auth (RSA, Ed25519, ECDSA)
+- **Server profiles** with save, rename, delete, and quick connect
+- **Smart save** — auto-switches server connection when saving a file from a different server
+- **File tree** auto-navigates to the correct directory after server switch
+- **File operations** — create, rename, delete files and directories, chmod permissions
+- **GUID-based** server references — rename profiles without breaking anything
+
+### Local Files
+- **Open local files** (Ctrl+O) with file type filters
+- **Create new local files** (Ctrl+N)
+- **Smart Ctrl+S** — saves locally for local files, uploads for remote files
+
+### UI & Customization
+- **Dark/light theme** toggle for the entire application
+- **Multiple color schemes** — Classic, Cobalt, Oblivion, Solarized, Tango, Yaru, and more
+- **Custom color editor** — per-element foreground, background, bold, italic with save/load
+- **Draggable resizable panes** — rearrange function list, editor, and file tree
+- **Console pane** — collapsible log of all FTP/SFTP operations with color-coded output
+- **Version display** in title bar
 
 ## Dependencies
 
@@ -47,6 +65,22 @@ chmod +x install.sh
 python3 synpad.py
 ```
 
+### Desktop Launcher (Linux)
+
+Create `~/.local/share/applications/synpad.desktop`:
+```ini
+[Desktop Entry]
+Name=SynPad
+Comment=Lightweight PHP IDE with FTP/SFTP
+Exec=python3 /path/to/synpad.py
+Icon=accessories-text-editor
+Terminal=false
+Type=Application
+Categories=Development;TextEditor;
+StartupNotify=false
+StartupWMClass=synpad
+```
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -59,6 +93,12 @@ python3 synpad.py
 | Ctrl+G | Go to line |
 | Ctrl+W | Close tab |
 | Ctrl+Q | Quit |
+| Tab (on `/**`) | Generate docblock |
+| Escape | Close search / console |
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
 ## License
 
