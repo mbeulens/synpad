@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.9.9"
+APP_VERSION = "1.9.10"
 DEBUG_MODE = False
 
 import gi
@@ -1387,7 +1387,7 @@ class SynPadWindow(Gtk.Window):
 
         menu.append(Gtk.SeparatorMenuItem())
 
-        item_settings = Gtk.MenuItem(label="Settings")
+        item_settings = Gtk.MenuItem(label="Server Manager")
         item_settings.connect('activate', self._on_open_settings)
         menu.append(item_settings)
 
