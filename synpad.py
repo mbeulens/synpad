@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.7"
+APP_VERSION = "1.10.8"
 DEBUG_MODE = False
 
 import gi
@@ -4342,12 +4342,21 @@ class SynPadWindow(Gtk.Window):
                 for i, j in zip(range(i1, i2), range(j1, j2)):
                     diff_rows.append((lines_a[i], lines_b[j], 'equal'))
             elif op == 'replace':
-                max_len = max(i2 - i1, j2 - j1)
-                for k in range(max_len):
-                    left = lines_a[i1 + k] if (i1 + k) < i2 else ''
-                    right = lines_b[j1 + k] if (j1 + k) < j2 else ''
+                # Pair up lines: both exist = replace, only left = delete, only right = insert
+                left_lines = list(range(i1, i2))
+                right_lines = list(range(j1, j2))
+                paired = min(len(left_lines), len(right_lines))
+                for k in range(paired):
                     change_positions.append(len(diff_rows))
-                    diff_rows.append((left, right, 'replace'))
+                    diff_rows.append((lines_a[left_lines[k]], lines_b[right_lines[k]], 'replace'))
+                # Remaining left lines are deletions
+                for k in range(paired, len(left_lines)):
+                    change_positions.append(len(diff_rows))
+                    diff_rows.append((lines_a[left_lines[k]], '', 'delete'))
+                # Remaining right lines are insertions
+                for k in range(paired, len(right_lines)):
+                    change_positions.append(len(diff_rows))
+                    diff_rows.append(('', lines_b[right_lines[k]], 'insert'))
             elif op == 'delete':
                 for i in range(i1, i2):
                     change_positions.append(len(diff_rows))
