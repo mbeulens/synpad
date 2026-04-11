@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.3"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -1816,20 +1816,18 @@ class SynPadWindow(Gtk.Window):
         self._console_buffer.set_text('')
 
     def _console_log(self, message, tag=None):
-        """Append a timestamped message to the console. Thread-safe via idle_add."""
+        """Insert a timestamped message at the top of the console. Thread-safe via idle_add."""
         def _do_log():
             import datetime
             ts = datetime.datetime.now().strftime('%H:%M:%S')
-            end = self._console_buffer.get_end_iter()
-            self._console_buffer.insert_with_tags_by_name(end, f"[{ts}] ", 'timestamp')
-            end = self._console_buffer.get_end_iter()
+            start = self._console_buffer.get_start_iter()
             if tag:
-                self._console_buffer.insert_with_tags_by_name(end, f"{message}\n", tag)
+                self._console_buffer.insert_with_tags_by_name(start, f"{message}\n", tag)
             else:
-                self._console_buffer.insert(end, f"{message}\n")
-            # Auto-scroll to bottom
-            end = self._console_buffer.get_end_iter()
-            self._console_view.scroll_to_iter(end, 0.0, False, 0.0, 0.0)
+                self._console_buffer.insert(start, f"{message}\n")
+            # Insert timestamp before the message we just added
+            start = self._console_buffer.get_start_iter()
+            self._console_buffer.insert_with_tags_by_name(start, f"[{ts}] ", 'timestamp')
             return False
 
         GLib.idle_add(_do_log)
