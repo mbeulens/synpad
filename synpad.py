@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.11.5"
+APP_VERSION = "1.11.6"
 DEBUG_MODE = False
 
 import gi
@@ -10,6 +10,7 @@ gi.require_version('GtkSource', '3.0')
 from gi.repository import Gtk, GtkSource, Gdk, GLib, Pango
 
 import ftplib
+import hashlib
 import json
 import os
 import re
@@ -176,6 +177,15 @@ class FTPManager:
             import datetime
             dt = datetime.datetime.strptime(ts_str, '%Y%m%d%H%M%S')
             return dt.timestamp()
+        except Exception:
+            return None
+
+    def get_remote_hash(self, remote_path):
+        """Download file content and return its SHA256 hash."""
+        try:
+            h = hashlib.sha256()
+            self.ftp.retrbinary(f'RETR {remote_path}', h.update)
+            return h.hexdigest()
         except Exception:
             return None
 
@@ -350,6 +360,20 @@ class SFTPManager:
         """Get the modification time of a remote file (Unix timestamp)."""
         try:
             return self.sftp.stat(remote_path).st_mtime
+        except Exception:
+            return None
+
+    def get_remote_hash(self, remote_path):
+        """Download file content and return its SHA256 hash."""
+        try:
+            h = hashlib.sha256()
+            with self.sftp.open(remote_path, 'rb') as f:
+                while True:
+                    chunk = f.read(32768)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            return h.hexdigest()
         except Exception:
             return None
 
@@ -1271,6 +1295,7 @@ class OpenTab:
         self.server_guid = server_guid  # GUID of the server this file belongs to
         self.remote_mtime = None  # remote file mtime when opened/last saved
         self.remote_size = None   # remote file size when opened/last saved
+        self.remote_hash = None   # SHA256 of remote content when opened/last saved
 
 
 # --- Main Window -------------------------------------------------------------
@@ -3295,6 +3320,8 @@ class SynPadWindow(Gtk.Window):
                 r_mtime = self.ftp_mgr.get_remote_mtime(remote_path)
                 r_size = self.ftp_mgr.get_remote_size(remote_path)
                 self.ftp_mgr.download(remote_path, local_path)
+                with open(local_path, 'rb') as f:
+                    r_hash = hashlib.sha256(f.read()).hexdigest()
                 with open(local_path, 'r', errors='replace') as f:
                     content = f.read()
 
@@ -3307,7 +3334,8 @@ class SynPadWindow(Gtk.Window):
                     if tab:
                         tab.remote_mtime = r_mtime
                         tab.remote_size = r_size
-                        self._debug(f"Stored remote stats: mtime={r_mtime}, size={r_size}")
+                        tab.remote_hash = r_hash
+                        self._debug(f"Stored remote stats: mtime={r_mtime}, size={r_size}, hash={r_hash[:12]}...")
 
                 GLib.idle_add(_create_and_set_stats)
             except Exception as e:
@@ -3845,43 +3873,59 @@ class SynPadWindow(Gtk.Window):
         def work():
             try:
                 # Check if file was modified on server since we opened it
+                # Step 1: fast mtime check
+                file_changed = False
                 if tab.remote_mtime is not None:
                     current_mtime = mgr.get_remote_mtime(tab.remote_path)
                     if current_mtime and current_mtime > tab.remote_mtime:
                         self._debug(f"Server mtime changed: {tab.remote_mtime} -> {current_mtime}")
-                        # Ask user on main thread and wait for response
-                        import queue
-                        result_q = queue.Queue()
+                        file_changed = True
 
-                        def _ask_overwrite():
-                            dlg = Gtk.MessageDialog(
-                                transient_for=self, modal=True,
-                                message_type=Gtk.MessageType.WARNING,
-                                buttons=Gtk.ButtonsType.YES_NO,
-                                text="File Modified on Server",
-                            )
-                            dlg.format_secondary_text(
-                                f"'{os.path.basename(tab.remote_path)}' has been "
-                                f"modified on the server since you opened it.\n\n"
-                                f"Overwrite the server version?")
-                            resp = dlg.run()
-                            dlg.destroy()
-                            result_q.put(resp == Gtk.ResponseType.YES)
+                # Step 2: definitive hash check (if mtime changed or unavailable)
+                if file_changed or (tab.remote_mtime is None and tab.remote_hash):
+                    current_hash = mgr.get_remote_hash(tab.remote_path)
+                    if current_hash and tab.remote_hash and current_hash != tab.remote_hash:
+                        self._debug(f"Server hash changed: {tab.remote_hash[:12]}... -> {current_hash[:12]}...")
+                        file_changed = True
+                    elif current_hash and tab.remote_hash and current_hash == tab.remote_hash:
+                        # Mtime changed but content is the same (e.g. touch, copy)
+                        self._debug("Mtime changed but hash is identical — safe to upload")
+                        file_changed = False
 
-                        GLib.idle_add(_ask_overwrite)
-                        overwrite = result_q.get()  # blocks until user answers
-                        if not overwrite:
-                            GLib.idle_add(self.item_save.set_sensitive, True)
-                            GLib.idle_add(self._set_status, "Upload cancelled")
-                            self._console_log("PUT CANCELLED — server file was modified", 'error')
-                            return
+                if file_changed:
+                    import queue
+                    result_q = queue.Queue()
+
+                    def _ask_overwrite():
+                        dlg = Gtk.MessageDialog(
+                            transient_for=self, modal=True,
+                            message_type=Gtk.MessageType.WARNING,
+                            buttons=Gtk.ButtonsType.YES_NO,
+                            text="File Modified on Server",
+                        )
+                        dlg.format_secondary_text(
+                            f"'{os.path.basename(tab.remote_path)}' has been "
+                            f"modified on the server since you opened it.\n\n"
+                            f"Overwrite the server version?")
+                        resp = dlg.run()
+                        dlg.destroy()
+                        result_q.put(resp == Gtk.ResponseType.YES)
+
+                    GLib.idle_add(_ask_overwrite)
+                    overwrite = result_q.get()
+                    if not overwrite:
+                        GLib.idle_add(self.item_save.set_sensitive, True)
+                        GLib.idle_add(self._set_status, "Upload cancelled")
+                        self._console_log("PUT CANCELLED — server file was modified", 'error')
+                        return
 
                 mgr.upload(tab.remote_path, tab.local_path, max_mb)
-                # Update stored mtime/size after successful upload
-                new_mtime = mgr.get_remote_mtime(tab.remote_path)
-                new_size = mgr.get_remote_size(tab.remote_path)
-                tab.remote_mtime = new_mtime
-                tab.remote_size = new_size
+                # Update stored stats after successful upload
+                tab.remote_mtime = mgr.get_remote_mtime(tab.remote_path)
+                tab.remote_size = mgr.get_remote_size(tab.remote_path)
+                # Hash the uploaded content
+                with open(tab.local_path, 'rb') as f:
+                    tab.remote_hash = hashlib.sha256(f.read()).hexdigest()
                 GLib.idle_add(self._on_upload_done, tab, page_num)
             except Exception as e:
                 GLib.idle_add(self._on_upload_failed, str(e))
