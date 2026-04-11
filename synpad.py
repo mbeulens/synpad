@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.3"
+APP_VERSION = "1.10.4"
 DEBUG_MODE = False
 
 import gi
@@ -4262,9 +4262,17 @@ class SynPadWindow(Gtk.Window):
         grid.attach(combo_b, 1, 1, 1, 1)
 
         for page_num, tab in sorted(self.tabs.items()):
-            name = os.path.basename(tab.remote_path)
-            combo_a.append(str(page_num), name)
-            combo_b.append(str(page_num), name)
+            filename = os.path.basename(tab.remote_path)
+            if tab.is_local:
+                parent = os.path.dirname(tab.remote_path)
+                label = f"{filename}  ({parent})" if parent else filename
+            else:
+                srv = find_server_by_guid(self.config, tab.server_guid)
+                srv_name = srv['name'] if srv else 'unknown'
+                parent = os.path.dirname(tab.remote_path)
+                label = f"{filename}  ({srv_name}:{parent})"
+            combo_a.append(str(page_num), label)
+            combo_b.append(str(page_num), label)
 
         # Pre-select current tab as left
         current = self.notebook.get_current_page()
