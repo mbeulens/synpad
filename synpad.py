@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.9.7"
+APP_VERSION = "1.9.8"
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -3348,13 +3348,14 @@ class SynPadWindow(Gtk.Window):
                       is_local=is_local, server_guid=server_guid)
         self.tabs[page_num] = tab
 
-        # Track modification
+        # Track modification — reads tab.remote_path so renamed/saved tabs show correct name
         def on_modified_changed(_buf):
+            name = os.path.basename(tab.remote_path)
             if buf.get_modified():
-                tab_label.set_markup(f"<b>* {os.path.basename(remote_path)}</b>")
+                tab_label.set_markup(f"<b>* {name}</b>")
                 tab.modified = True
             else:
-                tab_label.set_text(os.path.basename(remote_path))
+                tab_label.set_text(name)
                 tab.modified = False
 
         buf.connect('modified-changed', on_modified_changed)
