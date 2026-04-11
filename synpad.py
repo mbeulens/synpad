@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.10.10"
+APP_VERSION = "1.10.11"
 DEBUG_MODE = False
 
 import gi
@@ -4484,14 +4484,16 @@ class SynPadWindow(Gtk.Window):
 
         # --- Change minimap (right edge) ---
         minimap = Gtk.DrawingArea()
-        minimap.set_size_request(30, -1)
+        minimap.set_size_request(30, 100)
+        minimap.set_vexpand(True)
+        minimap.set_hexpand(False)
 
         def on_draw_minimap(widget, cr):
             alloc = widget.get_allocation()
             w = alloc.width
             h = alloc.height
-            if total_lines == 0:
-                return
+            if total_lines == 0 or h < 2:
+                return False
             # Background — darker to be visible
             cr.set_source_rgb(0.75, 0.75, 0.75)
             cr.rectangle(0, 0, w, h)
@@ -4527,6 +4529,7 @@ class SynPadWindow(Gtk.Window):
                 cr.set_line_width(1)
                 cr.rectangle(0.5, vp_start + 0.5, w - 1, max(vp_height, 4) - 1)
                 cr.stroke()
+            return False
 
         minimap.connect('draw', on_draw_minimap)
 
@@ -4549,8 +4552,11 @@ class SynPadWindow(Gtk.Window):
         minimap.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
         minimap.connect('button-press-event', on_minimap_click)
 
+        # Put minimap in a frame so it always has visible boundaries
+        minimap_frame = Gtk.Frame()
+        minimap_frame.add(minimap)
         main_box.pack_start(content_box, True, True, 0)
-        main_box.pack_start(minimap, False, False, 0)
+        main_box.pack_start(minimap_frame, False, False, 0)
 
         # Status bar with change count
         status = Gtk.Label()
