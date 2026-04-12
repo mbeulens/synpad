@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.13.0"
+APP_VERSION = "1.14.0"
 DEBUG_MODE = False
 
 import gi

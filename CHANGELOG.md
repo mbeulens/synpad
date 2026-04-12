@@ -4,6 +4,10 @@ All notable changes to SynPad are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.14.0] - 2026-04-12
+
+We skip 13 to be sure to be sure :)
+
 ## [1.13.0] - 2026-04-12
 
 ### Added
