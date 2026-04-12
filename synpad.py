@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.14.2"
+APP_VERSION = "1.14.3"
 DEBUG_MODE = False
 
 import gi
@@ -9,6 +9,7 @@ gi.require_version('Gtk', '3.0')
 gi.require_version('GtkSource', '3.0')
 from gi.repository import Gtk, GtkSource, Gdk, GLib, Pango
 
+import sys
 import ftplib
 import hashlib
 import json
@@ -6146,6 +6147,13 @@ def main():
     Gdk.set_program_class("synpad")
     win = SynPadWindow()
     win.show_all()
+
+    # Open file passed via command line (e.g. "Open with" from file manager)
+    if len(sys.argv) > 1:
+        filepath = os.path.abspath(sys.argv[1])
+        if os.path.isfile(filepath):
+            GLib.idle_add(win._open_local_file, filepath)
+
     Gtk.main()
 
 
