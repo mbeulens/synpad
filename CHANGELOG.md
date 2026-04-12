@@ -4,6 +4,12 @@ All notable changes to SynPad are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.15.0] - 2026-04-12
+
+### Added
+- Open files via "Open with" from the file manager — SynPad now accepts a file path as a command-line argument
+- Desktop launcher updated with `%f` to receive file paths from the system
+
 ## [1.14.0] - 2026-04-12
 
 We skip 13 to be sure to be sure :)

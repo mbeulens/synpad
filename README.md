@@ -73,6 +73,11 @@ chmod +x install.sh
 python3 synpad.py
 ```
 
+Open a file directly:
+```bash
+python3 synpad.py /path/to/file.php
+```
+
 ### Desktop Launcher (Linux)
 
 Create `~/.local/share/applications/synpad.desktop`:
@@ -80,7 +85,7 @@ Create `~/.local/share/applications/synpad.desktop`:
 [Desktop Entry]
 Name=SynPad
 Comment=Lightweight PHP IDE with FTP/SFTP
-Exec=python3 /path/to/synpad.py
+Exec=python3 /path/to/synpad.py %f
 Icon=accessories-text-editor
 Terminal=false
 Type=Application
