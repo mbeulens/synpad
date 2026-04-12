@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.12.8"
+APP_VERSION = "1.12.9"
 DEBUG_MODE = False
 
 import gi
@@ -1292,24 +1292,57 @@ class DocumentWordProvider(GObject.Object, GtkSource.CompletionProvider):
 
 # --- Colored Folder Icons ----------------------------------------------------
 
-_FOLDER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <path d="M1 3 C1 2 2 1 3 1 L6 1 L8 3 L13 3 C14 3 15 4 15 5 L15 13 C15 14 14 15 13 15 L3 15 C2 15 1 14 1 13 Z" fill="{color}" opacity="0.9"/>
-  <path d="M1 5 L15 5 L15 13 C15 14 14 15 13 15 L3 15 C2 15 1 14 1 13 Z" fill="{color}"/>
-</svg>"""
-
 _folder_pixbuf_cache = {}
 
-def get_folder_pixbuf(color):
-    """Generate a 16x16 colored folder icon as a GdkPixbuf."""
-    if color in _folder_pixbuf_cache:
-        return _folder_pixbuf_cache[color]
-    svg_data = _FOLDER_SVG.replace('{color}', color).encode('utf-8')
-    loader = GdkPixbuf.PixbufLoader.new_with_type('svg')
-    loader.write(svg_data)
-    loader.close()
-    pixbuf = loader.get_pixbuf()
-    _folder_pixbuf_cache[color] = pixbuf
-    return pixbuf
+def get_folder_pixbuf(color_hex):
+    """Get the theme folder icon tinted with the given color."""
+    if color_hex in _folder_pixbuf_cache:
+        return _folder_pixbuf_cache[color_hex]
+
+    # Load the theme folder icon
+    theme = Gtk.IconTheme.get_default()
+    try:
+        base = theme.load_icon('folder', 16, Gtk.IconLookupFlags.FORCE_SIZE)
+    except Exception:
+        return None
+
+    if not base:
+        return None
+
+    # Make a writable copy
+    pixbuf = base.copy()
+
+    # Parse target color
+    r = int(color_hex[1:3], 16)
+    g = int(color_hex[3:5], 16)
+    b = int(color_hex[5:7], 16)
+
+    # Tint each pixel
+    pixels = pixbuf.get_pixels()
+    n_channels = pixbuf.get_n_channels()
+    rowstride = pixbuf.get_rowstride()
+    width = pixbuf.get_width()
+    height = pixbuf.get_height()
+
+    new_pixels = bytearray(pixels)
+    for y in range(height):
+        for x in range(width):
+            offset = y * rowstride + x * n_channels
+            # Blend with target color, preserving luminance
+            pr, pg, pb = new_pixels[offset], new_pixels[offset+1], new_pixels[offset+2]
+            lum = (pr * 0.299 + pg * 0.587 + pb * 0.114) / 255.0
+            new_pixels[offset] = min(255, int(r * lum))
+            new_pixels[offset+1] = min(255, int(g * lum))
+            new_pixels[offset+2] = min(255, int(b * lum))
+
+    tinted = GdkPixbuf.Pixbuf.new_from_data(
+        bytes(new_pixels), pixbuf.get_colorspace(),
+        pixbuf.get_has_alpha(), pixbuf.get_bits_per_sample(),
+        width, height, rowstride)
+    # Keep a reference to the bytes so they don't get garbage collected
+    tinted._pixel_data = bytes(new_pixels)
+    _folder_pixbuf_cache[color_hex] = tinted
+    return tinted
 
 # Dreamweaver green for remote, Windows yellow for local
 REMOTE_FOLDER_COLOR = '#4e9a06'
