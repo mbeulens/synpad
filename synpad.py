@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.12.7"
+APP_VERSION = "1.12.8"
 DEBUG_MODE = False
 
 import gi
@@ -1583,8 +1583,7 @@ class SynPadWindow(Gtk.Window):
         text_renderer = Gtk.CellRendererText()
         col.pack_start(icon_renderer, False)
         col.pack_start(text_renderer, True)
-        col.add_attribute(icon_renderer, 'icon-name', 1)
-        col.add_attribute(icon_renderer, 'pixbuf', 5)
+        col.set_cell_data_func(icon_renderer, self._render_tree_icon)
         col.add_attribute(text_renderer, 'text', 0)
         self.tree_view.append_column(col)
 
@@ -1660,8 +1659,7 @@ class SynPadWindow(Gtk.Window):
         local_text = Gtk.CellRendererText()
         local_col.pack_start(local_icon, False)
         local_col.pack_start(local_text, True)
-        local_col.add_attribute(local_icon, 'icon-name', 1)
-        local_col.add_attribute(local_icon, 'pixbuf', 5)
+        local_col.set_cell_data_func(local_icon, self._render_tree_icon)
         local_col.add_attribute(local_text, 'text', 0)
         self._local_view.append_column(local_col)
 
@@ -2801,6 +2799,17 @@ class SynPadWindow(Gtk.Window):
         dlg.destroy()
 
     # -- Symbol Pane ----------------------------------------------------------
+
+    def _render_tree_icon(self, _col, renderer, model, tree_iter, _data=None):
+        """Cell data function: use pixbuf for folders, icon-name for files."""
+        pixbuf = model[tree_iter][5]
+        icon_name = model[tree_iter][1]
+        if pixbuf:
+            renderer.set_property('pixbuf', pixbuf)
+            renderer.set_property('icon-name', None)
+        else:
+            renderer.set_property('pixbuf', None)
+            renderer.set_property('icon-name', icon_name or 'text-x-generic')
 
     def _get_file_ext(self, filepath):
         return filepath.rsplit('.', 1)[-1].lower() if '.' in filepath else ''
