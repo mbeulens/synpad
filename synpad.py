@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.12.5"
+APP_VERSION = "1.12.6"
 DEBUG_MODE = False
 
 import gi
@@ -3241,7 +3241,7 @@ class SynPadWindow(Gtk.Window):
         menu.popup_at_pointer(event)
         return True
 
-    def _ask_name(self, title, prompt):
+    def _ask_name(self, title, prompt, default_value='', ok_label='Create'):
         """Show a simple dialog asking for a name. Returns name or None."""
         dlg = Gtk.Dialog(title=title, transient_for=self, modal=True,
                          use_header_bar=False)
@@ -3256,16 +3256,18 @@ class SynPadWindow(Gtk.Window):
 
         box.pack_start(Gtk.Label(label=prompt, halign=Gtk.Align.START), False, False, 0)
 
-        entry = Gtk.Entry()
+        entry = Gtk.Entry(text=default_value)
         entry.set_activates_default(False)
         entry.connect('activate', lambda _: dlg.response(Gtk.ResponseType.OK))
+        if default_value:
+            entry.select_region(0, -1)
         box.pack_start(entry, False, False, 0)
 
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         btn_cancel = Gtk.Button(label="Cancel")
         btn_cancel.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.CANCEL))
         btn_row.pack_end(btn_cancel, False, False, 0)
-        btn_ok = Gtk.Button(label="Create")
+        btn_ok = Gtk.Button(label=ok_label)
         btn_ok.get_style_context().add_class('suggested-action')
         btn_ok.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
         btn_row.pack_end(btn_ok, False, False, 0)
@@ -3486,7 +3488,8 @@ class SynPadWindow(Gtk.Window):
 
     def _on_tree_rename(self, remote_path, old_name, tree_iter):
         """Rename a file or directory on the server."""
-        new_name = self._ask_name("Rename", f"New name for '{old_name}':")
+        new_name = self._ask_name("Rename", f"New name for '{old_name}':",
+                                          default_value=old_name, ok_label="Rename")
         if not new_name or new_name == old_name:
             return
         parent_dir = os.path.dirname(remote_path)
@@ -4645,7 +4648,8 @@ class SynPadWindow(Gtk.Window):
 
     def _on_local_rename(self, local_path, old_name, tree_iter):
         """Rename a local file or directory."""
-        new_name = self._ask_name("Rename", f"New name for '{old_name}':")
+        new_name = self._ask_name("Rename", f"New name for '{old_name}':",
+                                          default_value=old_name, ok_label="Rename")
         if not new_name or new_name == old_name:
             return
         parent_dir = os.path.dirname(local_path)
