@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.12.3"
+APP_VERSION = "1.12.4"
 DEBUG_MODE = False
 
 import gi
@@ -51,6 +51,15 @@ DEFAULT_CONFIG = {
     'custom_colors': {},        # active custom overrides: style_id -> {fg, bg, bold, italic}
     'saved_color_schemes': {},  # name -> {base: scheme_id, colors: {style_id -> props}}
     'active_custom_scheme': '', # name of currently active saved custom scheme
+    'editor_extensions': [
+        'php', 'js', 'jsx', 'ts', 'tsx', 'py', 'html', 'htm', 'css',
+        'json', 'xml', 'sql', 'sh', 'bash', 'yml', 'yaml', 'md', 'txt',
+        'ini', 'conf', 'env', 'htaccess', 'gitignore', 'log', 'csv',
+        'tpl', 'twig', 'blade', 'vue', 'svelte', 'rb', 'java', 'c',
+        'h', 'cpp', 'hpp', 'rs', 'go', 'swift', 'kt', 'r', 'lua',
+        'pl', 'pm', 'toml', 'cfg', 'properties', 'less', 'scss', 'sass',
+        'svg', 'dockerfile', 'makefile', 'cmake',
+    ],
 }
 
 
@@ -1400,6 +1409,10 @@ class SynPadWindow(Gtk.Window):
         item_settings.connect('activate', self._on_open_settings)
         menu.append(item_settings)
 
+        item_file_types = Gtk.MenuItem(label="File Types")
+        item_file_types.connect('activate', self._on_edit_file_types)
+        menu.append(item_file_types)
+
         self._debug_menu_item = Gtk.CheckMenuItem(label="Debug Mode")
         self._debug_menu_item.set_active(DEBUG_MODE)
         self._debug_menu_item.connect('toggled', self._on_toggle_debug)
@@ -1984,6 +1997,101 @@ class SynPadWindow(Gtk.Window):
                 save_config(self.config)
         # Always rebuild quick connect — renames/saves/deletes may have happened
         self._rebuild_quick_menu()
+        dlg.destroy()
+
+    def _on_edit_file_types(self, _item):
+        """Dialog to manage which file extensions open in the editor."""
+        dlg = Gtk.Dialog(
+            title="File Types — Editor Extensions",
+            transient_for=self,
+            modal=True,
+            use_header_bar=False,
+        )
+        dlg.set_default_size(400, 450)
+
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+
+        box.pack_start(Gtk.Label(
+            label="File extensions that open in the editor.\n"
+                  "All other files open with the system default app.",
+            halign=Gtk.Align.START, wrap=True), False, False, 0)
+
+        # Extensions list
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+        ext_store = Gtk.ListStore(str)
+        for ext in sorted(self.config.get('editor_extensions', [])):
+            ext_store.append([ext])
+
+        ext_view = Gtk.TreeView(model=ext_store)
+        ext_view.set_headers_visible(False)
+        col = Gtk.TreeViewColumn("Extension")
+        cell = Gtk.CellRendererText()
+        col.pack_start(cell, True)
+        col.add_attribute(cell, 'text', 0)
+        ext_view.append_column(col)
+
+        scroll.add(ext_view)
+        box.pack_start(scroll, True, True, 0)
+
+        # Add/Remove row
+        edit_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        ext_entry = Gtk.Entry(placeholder_text="e.g. jsx")
+        ext_entry.set_hexpand(True)
+        edit_row.pack_start(ext_entry, True, True, 0)
+
+        btn_add = Gtk.Button(label="Add")
+        def _on_add(_btn):
+            ext = ext_entry.get_text().strip().lower().lstrip('.')
+            if ext:
+                # Check not already in list
+                for row in ext_store:
+                    if row[0] == ext:
+                        return
+                ext_store.append([ext])
+                ext_entry.set_text('')
+        btn_add.connect('clicked', _on_add)
+        ext_entry.connect('activate', _on_add)
+        edit_row.pack_start(btn_add, False, False, 0)
+
+        btn_remove = Gtk.Button(label="Remove")
+        def _on_remove(_btn):
+            sel = ext_view.get_selection()
+            model, it = sel.get_selected()
+            if it:
+                model.remove(it)
+        btn_remove.connect('clicked', _on_remove)
+        edit_row.pack_start(btn_remove, False, False, 0)
+
+        box.pack_start(edit_row, False, False, 0)
+
+        # Buttons
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_cancel = Gtk.Button(label="Cancel")
+        btn_cancel.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.CANCEL))
+        btn_row.pack_end(btn_cancel, False, False, 0)
+        btn_apply = Gtk.Button(label="Apply")
+        btn_apply.get_style_context().add_class('suggested-action')
+        btn_apply.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
+        btn_row.pack_end(btn_apply, False, False, 0)
+        box.pack_start(btn_row, False, False, 0)
+
+        dlg.show_all()
+        resp = dlg.run()
+
+        if resp == Gtk.ResponseType.OK:
+            new_exts = []
+            for row in ext_store:
+                new_exts.append(row[0])
+            self.config['editor_extensions'] = sorted(new_exts)
+            save_config(self.config)
+
         dlg.destroy()
 
     def _on_toggle_theme(self, _btn):
@@ -2668,6 +2776,28 @@ class SynPadWindow(Gtk.Window):
     def _get_file_ext(self, filepath):
         return filepath.rsplit('.', 1)[-1].lower() if '.' in filepath else ''
 
+    def _is_editor_file(self, filepath):
+        """Check if a file should open in the editor (vs external app)."""
+        name = os.path.basename(filepath).lower()
+        # Files without extension but with known names
+        if name in ('dockerfile', 'makefile', 'vagrantfile', 'gemfile',
+                     '.gitignore', '.htaccess', '.env'):
+            return True
+        ext = self._get_file_ext(filepath)
+        if not ext:
+            return True  # no extension = assume text
+        return ext in self.config.get('editor_extensions', [])
+
+    def _open_external(self, filepath):
+        """Open a file with the system's default application."""
+        import subprocess
+        try:
+            subprocess.Popen(['xdg-open', filepath],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._console_log(f"EXTERNAL {filepath}")
+        except Exception as e:
+            self._show_error("Open Failed", str(e))
+
     def _update_symbols(self, tab):
         """Parse and populate the symbol list for the given tab."""
         self.symbol_store.clear()
@@ -3008,7 +3138,27 @@ class SynPadWindow(Gtk.Window):
                 self.tree_view.expand_row(path, False)
         else:
             remote_path = self.tree_store[tree_iter][2]
-            self._open_file(remote_path)
+            if self._is_editor_file(remote_path):
+                self._open_file(remote_path)
+            else:
+                self._open_remote_external(remote_path)
+
+    def _open_remote_external(self, remote_path):
+        """Download a remote file to temp and open with system default app."""
+        self._set_status(f"Downloading {remote_path} for external open...")
+        self._console_log(f"GET (external) {remote_path}")
+        filename = os.path.basename(remote_path)
+        local_path = os.path.join(self.tmp_dir, filename)
+
+        def work():
+            try:
+                self.ftp_mgr.download(remote_path, local_path)
+                GLib.idle_add(self._open_external, local_path)
+                GLib.idle_add(self._set_status, f"Opened {filename} externally")
+            except Exception as e:
+                GLib.idle_add(self._show_error, "Download Failed", str(e))
+
+        threading.Thread(target=work, daemon=True).start()
 
     # -- File Tree Context Menu ------------------------------------------------
 
@@ -4345,7 +4495,10 @@ class SynPadWindow(Gtk.Window):
                 self._local_view.expand_row(path, False)
         else:
             filepath = self._local_store[tree_iter][2]
-            self._open_local_file(filepath)
+            if self._is_editor_file(filepath):
+                self._open_local_file(filepath)
+            else:
+                self._open_external(filepath)
 
     def _on_local_refresh(self, _btn):
         """Refresh the local file tree from current root."""
