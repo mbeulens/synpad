@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.12.1"
+APP_VERSION = "1.12.2"
 DEBUG_MODE = False
 
 import gi
@@ -1575,6 +1575,28 @@ class SynPadWindow(Gtk.Window):
 
         # --- Local file tree ---
         local_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        # Path bar with up button
+        local_path_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        local_path_row.set_margin_start(4)
+        local_path_row.set_margin_end(4)
+        local_path_row.set_margin_bottom(2)
+
+        btn_local_up = Gtk.Button()
+        btn_local_up.set_image(Gtk.Image.new_from_icon_name(
+            'go-up-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        btn_local_up.set_relief(Gtk.ReliefStyle.NONE)
+        btn_local_up.set_tooltip_text("Go to parent directory")
+        btn_local_up.connect('clicked', self._on_local_up)
+        local_path_row.pack_start(btn_local_up, False, False, 0)
+
+        self._local_path_entry = Gtk.Entry()
+        self._local_path_entry.set_text(str(Path.home()))
+        self._local_path_entry.set_tooltip_text("Type a path and press Enter")
+        self._local_path_entry.connect('activate', self._on_local_path_enter)
+        local_path_row.pack_start(self._local_path_entry, True, True, 0)
+
+        local_box.pack_start(local_path_row, False, False, 0)
 
         self._local_scroll = Gtk.ScrolledWindow()
         self._local_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
@@ -4251,6 +4273,9 @@ class SynPadWindow(Gtk.Window):
 
     def _load_local_tree(self, path, parent_iter=None):
         """Load local filesystem directory into the local tree."""
+        # Update path bar when loading a root directory
+        if parent_iter is None:
+            self._local_path_entry.set_text(path)
         try:
             entries = []
             for name in sorted(os.listdir(path), key=str.lower):
@@ -4325,7 +4350,27 @@ class SynPadWindow(Gtk.Window):
 
     def _on_local_home(self, _btn):
         """Navigate local tree to home directory."""
-        self._load_local_tree(str(Path.home()))
+        home = str(Path.home())
+        self._local_path_entry.set_text(home)
+        self._load_local_tree(home)
+
+    def _on_local_up(self, _btn):
+        """Navigate to parent directory."""
+        current = self._local_path_entry.get_text().strip()
+        if not current:
+            current = str(Path.home())
+        parent = os.path.dirname(current)
+        if parent and os.path.isdir(parent):
+            self._local_path_entry.set_text(parent)
+            self._load_local_tree(parent)
+
+    def _on_local_path_enter(self, entry):
+        """Navigate to the path typed in the entry."""
+        path = entry.get_text().strip()
+        if path and os.path.isdir(path):
+            self._load_local_tree(path)
+        elif path:
+            self._show_error("Invalid Path", f"'{path}' is not a valid directory.")
 
     # -- Keyboard Shortcuts ---------------------------------------------------
 
