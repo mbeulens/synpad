@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.12.6"
+APP_VERSION = "1.12.7"
 DEBUG_MODE = False
 
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('GtkSource', '3.0')
-from gi.repository import Gtk, GtkSource, Gdk, GLib, Pango
+from gi.repository import Gtk, GtkSource, Gdk, GdkPixbuf, GLib, Pango
 
 import ftplib
 import hashlib
@@ -1290,6 +1290,32 @@ class DocumentWordProvider(GObject.Object, GtkSource.CompletionProvider):
 
 # --- Open Tab Tracker --------------------------------------------------------
 
+# --- Colored Folder Icons ----------------------------------------------------
+
+_FOLDER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path d="M1 3 C1 2 2 1 3 1 L6 1 L8 3 L13 3 C14 3 15 4 15 5 L15 13 C15 14 14 15 13 15 L3 15 C2 15 1 14 1 13 Z" fill="{color}" opacity="0.9"/>
+  <path d="M1 5 L15 5 L15 13 C15 14 14 15 13 15 L3 15 C2 15 1 14 1 13 Z" fill="{color}"/>
+</svg>"""
+
+_folder_pixbuf_cache = {}
+
+def get_folder_pixbuf(color):
+    """Generate a 16x16 colored folder icon as a GdkPixbuf."""
+    if color in _folder_pixbuf_cache:
+        return _folder_pixbuf_cache[color]
+    svg_data = _FOLDER_SVG.replace('{color}', color).encode('utf-8')
+    loader = GdkPixbuf.PixbufLoader.new_with_type('svg')
+    loader.write(svg_data)
+    loader.close()
+    pixbuf = loader.get_pixbuf()
+    _folder_pixbuf_cache[color] = pixbuf
+    return pixbuf
+
+# Dreamweaver green for remote, Windows yellow for local
+REMOTE_FOLDER_COLOR = '#4e9a06'
+LOCAL_FOLDER_COLOR = '#e6b800'
+
+
 class OpenTab:
     """Represents one open file tab."""
 
@@ -1547,8 +1573,8 @@ class SynPadWindow(Gtk.Window):
         self.scroll_tree.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         self.scroll_tree.set_size_request(150, -1)
 
-        # TreeStore: name, icon_name, full_path, is_dir, loaded
-        self.tree_store = Gtk.TreeStore(str, str, str, bool, bool)
+        # TreeStore: name, icon_name, full_path, is_dir, loaded, pixbuf
+        self.tree_store = Gtk.TreeStore(str, str, str, bool, bool, GdkPixbuf.Pixbuf)
         self.tree_view = Gtk.TreeView(model=self.tree_store)
         self.tree_view.set_headers_visible(False)
 
@@ -1558,6 +1584,7 @@ class SynPadWindow(Gtk.Window):
         col.pack_start(icon_renderer, False)
         col.pack_start(text_renderer, True)
         col.add_attribute(icon_renderer, 'icon-name', 1)
+        col.add_attribute(icon_renderer, 'pixbuf', 5)
         col.add_attribute(text_renderer, 'text', 0)
         self.tree_view.append_column(col)
 
@@ -1624,7 +1651,7 @@ class SynPadWindow(Gtk.Window):
         self._local_scroll = Gtk.ScrolledWindow()
         self._local_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
 
-        self._local_store = Gtk.TreeStore(str, str, str, bool, bool)
+        self._local_store = Gtk.TreeStore(str, str, str, bool, bool, GdkPixbuf.Pixbuf)
         self._local_view = Gtk.TreeView(model=self._local_store)
         self._local_view.set_headers_visible(False)
 
@@ -1634,6 +1661,7 @@ class SynPadWindow(Gtk.Window):
         local_col.pack_start(local_icon, False)
         local_col.pack_start(local_text, True)
         local_col.add_attribute(local_icon, 'icon-name', 1)
+        local_col.add_attribute(local_icon, 'pixbuf', 5)
         local_col.add_attribute(local_text, 'text', 0)
         self._local_view.append_column(local_col)
 
@@ -3079,13 +3107,15 @@ class SynPadWindow(Gtk.Window):
 
         # Add new entries
         norm = path.rstrip('/') or ''
+        green_pb = get_folder_pixbuf(REMOTE_FOLDER_COLOR)
         for name, is_dir in entries:
             full = f"{norm}/{name}"
-            icon = 'folder' if is_dir else self._icon_for_file(name)
-            it = self.tree_store.append(parent_iter, [name, icon, full, is_dir, False])
             if is_dir:
-                # Add placeholder child so the expander arrow shows
-                self.tree_store.append(it, ['Loading...', 'content-loading-symbolic', '', False, False])
+                it = self.tree_store.append(parent_iter, [name, '', full, is_dir, False, green_pb])
+                self.tree_store.append(it, ['Loading...', 'content-loading-symbolic', '', False, False, None])
+            else:
+                icon = self._icon_for_file(name)
+                self.tree_store.append(parent_iter, [name, icon, full, is_dir, False, None])
 
         # Now remove old placeholders (row is still expanded because it has new children)
         if old_children:
@@ -4466,11 +4496,14 @@ class SynPadWindow(Gtk.Window):
         # Sort: dirs first, then files
         entries.sort(key=lambda x: (not x[1], x[0].lower()))
 
+        yellow_pb = get_folder_pixbuf(LOCAL_FOLDER_COLOR)
         for name, is_dir, full in entries:
-            icon = 'folder' if is_dir else self._icon_for_file(name)
-            it = self._local_store.append(parent_iter, [name, icon, full, is_dir, False])
             if is_dir:
-                self._local_store.append(it, ['Loading...', 'content-loading-symbolic', '', False, False])
+                it = self._local_store.append(parent_iter, [name, '', full, is_dir, False, yellow_pb])
+                self._local_store.append(it, ['Loading...', 'content-loading-symbolic', '', False, False, None])
+            else:
+                icon = self._icon_for_file(name)
+                self._local_store.append(parent_iter, [name, icon, full, is_dir, False, None])
 
         if old:
             for tp in reversed(old):
