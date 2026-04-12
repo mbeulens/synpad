@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.14.0"
+APP_VERSION = "1.14.1"
 DEBUG_MODE = False
 
 import gi
@@ -48,8 +48,9 @@ DEFAULT_CONFIG = {
     'pane_order': ['symbols', 'editor', 'files'],  # left to right
     'dark_theme': True,        # editor color scheme
     'color_scheme': 'oblivion', # GtkSourceView style scheme id
-    'custom_colors': {},        # active custom overrides: style_id -> {fg, bg, bold, italic}
-    'saved_color_schemes': {},  # name -> {base: scheme_id, colors: {style_id -> props}}
+    'custom_colors_dark': {},   # dark mode overrides: style_id -> {fg, bg, bold, italic}
+    'custom_colors_light': {},  # light mode overrides
+    'saved_color_schemes': {},  # name -> {base, colors_dark, colors_light}
     'active_custom_scheme': '', # name of currently active saved custom scheme
     'editor_extensions': [
         'php', 'js', 'jsx', 'ts', 'tsx', 'py', 'html', 'htm', 'css',
@@ -76,6 +77,18 @@ def load_config():
         for srv in cfg.get('servers', []):
             if 'guid' not in srv:
                 srv['guid'] = str(uuid.uuid4())
+                migrated = True
+        # Migrate: old custom_colors -> custom_colors_dark
+        if 'custom_colors' in cfg and cfg['custom_colors']:
+            cfg.setdefault('custom_colors_dark', cfg.pop('custom_colors'))
+            migrated = True
+        elif 'custom_colors' in cfg:
+            del cfg['custom_colors']
+        # Migrate: old saved_color_schemes with 'colors' -> 'colors_dark'
+        for name, scheme in cfg.get('saved_color_schemes', {}).items():
+            if 'colors' in scheme and 'colors_dark' not in scheme:
+                scheme['colors_dark'] = scheme.pop('colors')
+                scheme.setdefault('colors_light', {})
                 migrated = True
         if migrated:
             save_config(cfg)
@@ -1869,11 +1882,16 @@ class SynPadWindow(Gtk.Window):
 
         self._outer_paned.show_all()
 
+    def _get_active_custom_colors(self):
+        """Return the custom colors dict for the current theme mode."""
+        if self.config.get('dark_theme', True):
+            return self.config.get('custom_colors_dark', {})
+        return self.config.get('custom_colors_light', {})
+
     def _get_scheme(self):
         """Return the GtkSource scheme, applying custom color overrides."""
-        custom = self.config.get('custom_colors', {})
+        custom = self._get_active_custom_colors()
         if custom:
-            # Build a custom scheme XML and load it
             return self._build_custom_scheme()
         mgr = GtkSource.StyleSchemeManager.get_default()
         scheme_id = self.config.get('color_scheme', 'oblivion')
@@ -1882,7 +1900,7 @@ class SynPadWindow(Gtk.Window):
     def _build_custom_scheme(self):
         """Generate a custom GtkSourceView scheme XML from config overrides."""
         base_id = self.config.get('color_scheme', 'oblivion')
-        custom = self.config.get('custom_colors', {})
+        custom = self._get_active_custom_colors()
 
         # Start from the base scheme to get its background/text colors
         mgr = GtkSource.StyleSchemeManager.get_default()
@@ -2378,9 +2396,122 @@ class SynPadWindow(Gtk.Window):
         ('line-numbers',        'Line Numbers'),
     ]
 
+    def _build_color_tab(self, colors):
+        """Build a scrolled grid of color pickers for one theme mode.
+        Returns (scroll_widget, buttons_dict, read_fn, load_fn)."""
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=6)
+        grid.set_margin_top(8)
+        grid.set_margin_start(4)
+        grid.set_margin_end(4)
+        grid.attach(Gtk.Label(label="<b>Element</b>", use_markup=True,
+                              halign=Gtk.Align.START), 0, 0, 1, 1)
+        grid.attach(Gtk.Label(label="<b>Foreground</b>", use_markup=True), 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label="<b>Background</b>", use_markup=True), 2, 0, 1, 1)
+        grid.attach(Gtk.Label(label="<b>B</b>", use_markup=True), 3, 0, 1, 1)
+        grid.attach(Gtk.Label(label="<b>I</b>", use_markup=True), 4, 0, 1, 1)
+
+        buttons = {}
+        for row_i, (style_id, label) in enumerate(self.STYLE_ITEMS, start=1):
+            props = colors.get(style_id, {})
+            grid.attach(Gtk.Label(label=label, halign=Gtk.Align.START), 0, row_i, 1, 1)
+
+            fg_chk = Gtk.CheckButton()
+            fg_btn = Gtk.ColorButton()
+            fg_btn.props.use_alpha = False
+            fg_btn.set_title(f"{label} Foreground")
+            if props.get('fg'):
+                rgba = Gdk.RGBA()
+                rgba.parse(props['fg'])
+                fg_btn.set_rgba(rgba)
+                fg_chk.set_active(True)
+            fg_btn.set_sensitive(fg_chk.get_active())
+            fg_chk.connect('toggled', lambda c, b: b.set_sensitive(c.get_active()), fg_btn)
+            fg_btn.connect('color-set', lambda b, c: c.set_active(True), fg_chk)
+            fg_box = Gtk.Box(spacing=2)
+            fg_box.pack_start(fg_chk, False, False, 0)
+            fg_box.pack_start(fg_btn, False, False, 0)
+            grid.attach(fg_box, 1, row_i, 1, 1)
+
+            bg_chk = Gtk.CheckButton()
+            bg_btn = Gtk.ColorButton()
+            bg_btn.props.use_alpha = False
+            bg_btn.set_title(f"{label} Background")
+            if props.get('bg'):
+                rgba = Gdk.RGBA()
+                rgba.parse(props['bg'])
+                bg_btn.set_rgba(rgba)
+                bg_chk.set_active(True)
+            bg_btn.set_sensitive(bg_chk.get_active())
+            bg_chk.connect('toggled', lambda c, b: b.set_sensitive(c.get_active()), bg_btn)
+            bg_btn.connect('color-set', lambda b, c: c.set_active(True), bg_chk)
+            bg_box = Gtk.Box(spacing=2)
+            bg_box.pack_start(bg_chk, False, False, 0)
+            bg_box.pack_start(bg_btn, False, False, 0)
+            grid.attach(bg_box, 2, row_i, 1, 1)
+
+            bold_chk = Gtk.CheckButton()
+            bold_chk.set_active(props.get('bold', False))
+            grid.attach(bold_chk, 3, row_i, 1, 1)
+
+            italic_chk = Gtk.CheckButton()
+            italic_chk.set_active(props.get('italic', False))
+            grid.attach(italic_chk, 4, row_i, 1, 1)
+
+            buttons[style_id] = {
+                'fg_btn': fg_btn, 'fg_chk': fg_chk,
+                'bg_btn': bg_btn, 'bg_chk': bg_chk,
+                'bold_chk': bold_chk, 'italic_chk': italic_chk,
+            }
+
+        scroll.add(grid)
+
+        def read_colors():
+            result = {}
+            for sid, w in buttons.items():
+                p = {}
+                if w['fg_chk'].get_active():
+                    p['fg'] = self._rgba_to_hex(w['fg_btn'].get_rgba())
+                if w['bg_chk'].get_active():
+                    p['bg'] = self._rgba_to_hex(w['bg_btn'].get_rgba())
+                if w['bold_chk'].get_active():
+                    p['bold'] = True
+                if w['italic_chk'].get_active():
+                    p['italic'] = True
+                if p:
+                    result[sid] = p
+            return result
+
+        def load_colors(colors):
+            for sid, w in buttons.items():
+                p = colors.get(sid, {})
+                if p.get('fg'):
+                    rgba = Gdk.RGBA()
+                    rgba.parse(p['fg'])
+                    w['fg_btn'].set_rgba(rgba)
+                    w['fg_chk'].set_active(True)
+                else:
+                    w['fg_chk'].set_active(False)
+                w['fg_btn'].set_sensitive(w['fg_chk'].get_active())
+                if p.get('bg'):
+                    rgba = Gdk.RGBA()
+                    rgba.parse(p['bg'])
+                    w['bg_btn'].set_rgba(rgba)
+                    w['bg_chk'].set_active(True)
+                else:
+                    w['bg_chk'].set_active(False)
+                w['bg_btn'].set_sensitive(w['bg_chk'].get_active())
+                w['bold_chk'].set_active(p.get('bold', False))
+                w['italic_chk'].set_active(p.get('italic', False))
+
+        return scroll, buttons, read_colors, load_colors
+
     def _on_custom_colors(self, _item):
-        """Dialog to customize individual syntax element colors."""
-        custom = dict(self.config.get('custom_colors', {}))
+        """Dialog to customize syntax colors with Dark and Light tabs."""
+        dark_colors = dict(self.config.get('custom_colors_dark', {}))
+        light_colors = dict(self.config.get('custom_colors_light', {}))
 
         dlg = Gtk.Dialog(
             title="Custom Colors",
@@ -2388,7 +2519,7 @@ class SynPadWindow(Gtk.Window):
             modal=True,
             use_header_bar=False,
         )
-        dlg.set_default_size(520, 560)
+        dlg.set_default_size(540, 620)
 
         box = dlg.get_content_area()
         box.set_spacing(4)
@@ -2396,7 +2527,7 @@ class SynPadWindow(Gtk.Window):
         box.set_margin_end(12)
         box.set_margin_top(12)
 
-        # --- Load saved scheme row (top) ---
+        # --- Load saved scheme row ---
         load_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         load_row.pack_start(Gtk.Label(label="Load scheme:", halign=Gtk.Align.START), False, False, 0)
 
@@ -2415,125 +2546,19 @@ class SynPadWindow(Gtk.Window):
         box.pack_start(load_row, False, False, 0)
         box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
 
-        box.pack_start(Gtk.Label(
-            label="Check a box to override that color. Uncheck to use scheme default.",
-            halign=Gtk.Align.START, wrap=True), False, False, 0)
+        # --- Notebook with Dark / Light tabs ---
+        notebook = Gtk.Notebook()
 
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        dark_scroll, dark_btns, read_dark, load_dark = self._build_color_tab(dark_colors)
+        notebook.append_page(dark_scroll, Gtk.Label(label="Dark Mode"))
 
-        grid = Gtk.Grid(column_spacing=10, row_spacing=6)
-        grid.set_margin_top(8)
-        grid.attach(Gtk.Label(label="<b>Element</b>", use_markup=True,
-                              halign=Gtk.Align.START), 0, 0, 1, 1)
-        grid.attach(Gtk.Label(label="<b>Foreground</b>", use_markup=True), 1, 0, 1, 1)
-        grid.attach(Gtk.Label(label="<b>Background</b>", use_markup=True), 2, 0, 1, 1)
-        grid.attach(Gtk.Label(label="<b>B</b>", use_markup=True), 3, 0, 1, 1)
-        grid.attach(Gtk.Label(label="<b>I</b>", use_markup=True), 4, 0, 1, 1)
+        light_scroll, light_btns, read_light, load_light = self._build_color_tab(light_colors)
+        notebook.append_page(light_scroll, Gtk.Label(label="Light Mode"))
 
-        color_buttons = {}
+        # Start on the tab matching current theme
+        notebook.set_current_page(0 if self.config.get('dark_theme', True) else 1)
 
-        for row_i, (style_id, label) in enumerate(self.STYLE_ITEMS, start=1):
-            props = custom.get(style_id, {})
-
-            grid.attach(Gtk.Label(label=label, halign=Gtk.Align.START), 0, row_i, 1, 1)
-
-            # Foreground: checkbox + color button
-            fg_chk = Gtk.CheckButton()
-            fg_btn = Gtk.ColorButton()
-            fg_btn.props.use_alpha = False
-            fg_btn.set_title(f"{label} Foreground")
-            if props.get('fg'):
-                rgba = Gdk.RGBA()
-                rgba.parse(props['fg'])
-                fg_btn.set_rgba(rgba)
-                fg_chk.set_active(True)
-            fg_btn.set_sensitive(fg_chk.get_active())
-            fg_chk.connect('toggled', lambda c, b: b.set_sensitive(c.get_active()), fg_btn)
-            fg_btn.connect('color-set', lambda b, c: c.set_active(True), fg_chk)
-            fg_box = Gtk.Box(spacing=2)
-            fg_box.pack_start(fg_chk, False, False, 0)
-            fg_box.pack_start(fg_btn, False, False, 0)
-            grid.attach(fg_box, 1, row_i, 1, 1)
-
-            # Background: checkbox + color button
-            bg_chk = Gtk.CheckButton()
-            bg_btn = Gtk.ColorButton()
-            bg_btn.props.use_alpha = False
-            bg_btn.set_title(f"{label} Background")
-            if props.get('bg'):
-                rgba = Gdk.RGBA()
-                rgba.parse(props['bg'])
-                bg_btn.set_rgba(rgba)
-                bg_chk.set_active(True)
-            bg_btn.set_sensitive(bg_chk.get_active())
-            bg_chk.connect('toggled', lambda c, b: b.set_sensitive(c.get_active()), bg_btn)
-            bg_btn.connect('color-set', lambda b, c: c.set_active(True), bg_chk)
-            bg_box = Gtk.Box(spacing=2)
-            bg_box.pack_start(bg_chk, False, False, 0)
-            bg_box.pack_start(bg_btn, False, False, 0)
-            grid.attach(bg_box, 2, row_i, 1, 1)
-
-            # Bold checkbox
-            bold_chk = Gtk.CheckButton()
-            bold_chk.set_active(props.get('bold', False))
-            grid.attach(bold_chk, 3, row_i, 1, 1)
-
-            # Italic checkbox
-            italic_chk = Gtk.CheckButton()
-            italic_chk.set_active(props.get('italic', False))
-            grid.attach(italic_chk, 4, row_i, 1, 1)
-
-            color_buttons[style_id] = {
-                'fg_btn': fg_btn, 'fg_chk': fg_chk,
-                'bg_btn': bg_btn, 'bg_chk': bg_chk,
-                'bold_chk': bold_chk, 'italic_chk': italic_chk,
-            }
-
-        scroll.add(grid)
-        box.pack_start(scroll, True, True, 0)
-
-        # --- Helper: read current colors from the dialog widgets ---
-        def _read_colors():
-            result = {}
-            for sid, w in color_buttons.items():
-                p = {}
-                if w['fg_chk'].get_active():
-                    p['fg'] = self._rgba_to_hex(w['fg_btn'].get_rgba())
-                if w['bg_chk'].get_active():
-                    p['bg'] = self._rgba_to_hex(w['bg_btn'].get_rgba())
-                if w['bold_chk'].get_active():
-                    p['bold'] = True
-                if w['italic_chk'].get_active():
-                    p['italic'] = True
-                if p:
-                    result[sid] = p
-            return result
-
-        # --- Helper: load colors into the dialog widgets ---
-        def _load_colors(colors):
-            for sid, w in color_buttons.items():
-                p = colors.get(sid, {})
-                if p.get('fg'):
-                    rgba = Gdk.RGBA()
-                    rgba.parse(p['fg'])
-                    w['fg_btn'].set_rgba(rgba)
-                    w['fg_chk'].set_active(True)
-                else:
-                    w['fg_chk'].set_active(False)
-                w['fg_btn'].set_sensitive(w['fg_chk'].get_active())
-
-                if p.get('bg'):
-                    rgba = Gdk.RGBA()
-                    rgba.parse(p['bg'])
-                    w['bg_btn'].set_rgba(rgba)
-                    w['bg_chk'].set_active(True)
-                else:
-                    w['bg_chk'].set_active(False)
-                w['bg_btn'].set_sensitive(w['bg_chk'].get_active())
-
-                w['bold_chk'].set_active(p.get('bold', False))
-                w['italic_chk'].set_active(p.get('italic', False))
+        box.pack_start(notebook, True, True, 0)
 
         # --- Save button ---
         def on_save_scheme(_btn):
@@ -2541,38 +2566,34 @@ class SynPadWindow(Gtk.Window):
             if not name:
                 self._show_error("Save Failed", "Please enter a scheme name.")
                 return
-
             saved = self.config.get('saved_color_schemes', {})
             saved[name] = {
                 'base': self.config.get('color_scheme', 'oblivion'),
-                'colors': _read_colors(),
+                'colors_dark': read_dark(),
+                'colors_light': read_light(),
             }
             self.config['saved_color_schemes'] = saved
             self.config['active_custom_scheme'] = name
             save_config(self.config)
-
-            # Update load combo
             if scheme_combo.set_active_id(name) is None:
                 scheme_combo.append(name, name)
                 scheme_combo.set_active_id(name)
-
             self._set_status(f"Saved color scheme '{name}'")
-
-        # btn_save_scheme connected after widget is created (below)
 
         # --- Load on combo change ---
         def on_scheme_changed(combo):
             sid = combo.get_active_id()
             if sid == '__none__':
-                _load_colors({})
+                load_dark({})
+                load_light({})
                 return
             saved = self.config.get('saved_color_schemes', {})
             if sid in saved:
                 scheme_data = saved[sid]
-                # Also switch base scheme
                 base = scheme_data.get('base', 'oblivion')
                 self.config['color_scheme'] = base
-                _load_colors(scheme_data.get('colors', {}))
+                load_dark(scheme_data.get('colors_dark', {}))
+                load_light(scheme_data.get('colors_light', {}))
 
         scheme_combo.connect('changed', on_scheme_changed)
 
@@ -2588,9 +2609,8 @@ class SynPadWindow(Gtk.Window):
                 if self.config.get('active_custom_scheme') == sid:
                     self.config['active_custom_scheme'] = ''
                 save_config(self.config)
-                # Rebuild combo
                 scheme_combo.remove_all()
-                scheme_combo.append('__none__', '(unsaved)')
+                scheme_combo.append('__none__', '(none)')
                 for n in sorted(saved.keys()):
                     scheme_combo.append(n, n)
                 scheme_combo.set_active_id('__none__')
@@ -2601,37 +2621,30 @@ class SynPadWindow(Gtk.Window):
         box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
         save_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         save_row.pack_start(Gtk.Label(label="Save as:", halign=Gtk.Align.START), False, False, 0)
-
         scheme_name_entry = Gtk.Entry()
         scheme_name_entry.set_placeholder_text("Enter scheme name")
         current_name = self.config.get('active_custom_scheme', '')
         if current_name:
             scheme_name_entry.set_text(current_name)
         save_row.pack_start(scheme_name_entry, True, True, 0)
-
         btn_save_scheme = Gtk.Button(label="Save")
         btn_save_scheme.get_style_context().add_class('suggested-action')
         btn_save_scheme.connect('clicked', on_save_scheme)
         save_row.pack_start(btn_save_scheme, False, False, 0)
-
         box.pack_start(save_row, False, False, 0)
 
-        # --- Bottom button row ---
+        # --- Bottom buttons ---
         box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         btn_row.set_margin_bottom(8)
-
         btn_reset = Gtk.Button(label="Reset All")
-        btn_reset.set_tooltip_text("Clear all custom colors")
+        btn_reset.set_tooltip_text("Clear all custom colors (both modes)")
         btn_row.pack_start(btn_reset, False, False, 0)
-
         btn_cancel = Gtk.Button(label="Cancel")
         btn_row.pack_end(btn_cancel, False, False, 0)
-
         btn_apply = Gtk.Button(label="Apply")
         btn_apply.get_style_context().add_class('suggested-action')
         btn_row.pack_end(btn_apply, False, False, 0)
-
         box.pack_start(btn_row, False, False, 0)
 
         btn_apply.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
@@ -2639,18 +2652,18 @@ class SynPadWindow(Gtk.Window):
         btn_reset.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.REJECT))
 
         dlg.show_all()
-
         resp = dlg.run()
 
         if resp == Gtk.ResponseType.OK:
-            self.config['custom_colors'] = _read_colors()
+            self.config['custom_colors_dark'] = read_dark()
+            self.config['custom_colors_light'] = read_light()
             active = scheme_combo.get_active_id()
             self.config['active_custom_scheme'] = active if active != '__none__' else ''
             save_config(self.config)
             self._apply_scheme_to_all()
-
         elif resp == Gtk.ResponseType.REJECT:
-            self.config['custom_colors'] = {}
+            self.config['custom_colors_dark'] = {}
+            self.config['custom_colors_light'] = {}
             self.config['active_custom_scheme'] = ''
             save_config(self.config)
             self._apply_scheme_to_all()
