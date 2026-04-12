@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.12.1"
 DEBUG_MODE = False
 
 import gi
@@ -1477,13 +1477,75 @@ class SynPadWindow(Gtk.Window):
         self.notebook.append_page(welcome, Gtk.Label(label="Welcome"))
         self.editor_pane.pack_start(self.notebook, True, True, 0)
 
-        # 3) File tree — with connection controls below header
+        # 3) File tree — with local/remote toggle and connection controls
         self.files_pane = self._make_pane_wrapper('files', 'Files')
 
-        # Row 1: Connect, Disconnect, Refresh icons
+        # --- Toggle buttons: Remote / Local ---
+        toggle_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        toggle_row.set_margin_start(4)
+        toggle_row.set_margin_end(4)
+        toggle_row.set_margin_bottom(2)
+
+        self.btn_remote_tree = Gtk.ToggleButton(label="Remote")
+        self.btn_remote_tree.set_active(True)
+        self.btn_remote_tree.set_relief(Gtk.ReliefStyle.NONE)
+        self.btn_remote_tree.set_tooltip_text("Show remote server files")
+        toggle_row.pack_start(self.btn_remote_tree, True, True, 0)
+
+        self.btn_local_tree = Gtk.ToggleButton(label="Local")
+        self.btn_local_tree.set_active(False)
+        self.btn_local_tree.set_relief(Gtk.ReliefStyle.NONE)
+        self.btn_local_tree.set_tooltip_text("Show local files")
+        toggle_row.pack_start(self.btn_local_tree, True, True, 0)
+
+        self.files_pane.pack_start(toggle_row, False, False, 0)
+
+        # --- Stack to switch between remote and local trees ---
+        self._file_stack = Gtk.Stack()
+        self._file_stack.set_transition_type(Gtk.StackTransitionType.NONE)
+
+        # --- Remote tree ---
+        remote_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+        # Quick connect dropdown
+        server_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        server_row.set_margin_start(4)
+        server_row.set_margin_end(4)
+        server_row.set_margin_bottom(2)
+
+        self.quick_btn = Gtk.MenuButton(label="Quick Connect")
+        self.quick_btn.set_tooltip_text("Quick connect to saved server")
+        self.quick_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self._rebuild_quick_menu()
+        server_row.pack_start(self.quick_btn, True, True, 0)
+        remote_box.pack_start(server_row, False, False, 0)
+
+        self.scroll_tree = Gtk.ScrolledWindow()
+        self.scroll_tree.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.scroll_tree.set_size_request(150, -1)
+
+        # TreeStore: name, icon_name, full_path, is_dir, loaded
+        self.tree_store = Gtk.TreeStore(str, str, str, bool, bool)
+        self.tree_view = Gtk.TreeView(model=self.tree_store)
+        self.tree_view.set_headers_visible(False)
+
+        col = Gtk.TreeViewColumn("Files")
+        icon_renderer = Gtk.CellRendererPixbuf()
+        text_renderer = Gtk.CellRendererText()
+        col.pack_start(icon_renderer, False)
+        col.pack_start(text_renderer, True)
+        col.add_attribute(icon_renderer, 'icon-name', 1)
+        col.add_attribute(text_renderer, 'text', 0)
+        self.tree_view.append_column(col)
+
+        self.scroll_tree.add(self.tree_view)
+        remote_box.pack_start(self.scroll_tree, True, True, 0)
+
+        # Connection buttons at bottom of remote view
         conn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         conn_row.set_margin_start(4)
         conn_row.set_margin_end(4)
+        conn_row.set_margin_bottom(4)
 
         self.btn_connect = Gtk.Button()
         self.btn_connect.set_image(Gtk.Image.new_from_icon_name(
@@ -1508,43 +1570,61 @@ class SynPadWindow(Gtk.Window):
         self.btn_refresh.set_sensitive(False)
         conn_row.pack_start(self.btn_refresh, False, False, 0)
 
-        self.scroll_tree = Gtk.ScrolledWindow()
-        self.scroll_tree.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        self.scroll_tree.set_size_request(150, -1)
+        remote_box.pack_end(conn_row, False, False, 0)
+        self._file_stack.add_named(remote_box, 'remote')
 
-        self.tree_store = Gtk.TreeStore(str, str, str, bool, bool)
-        self.tree_view = Gtk.TreeView(model=self.tree_store)
-        self.tree_view.set_headers_visible(False)
+        # --- Local file tree ---
+        local_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
-        col = Gtk.TreeViewColumn("Files")
-        icon_renderer = Gtk.CellRendererPixbuf()
-        text_renderer = Gtk.CellRendererText()
-        col.pack_start(icon_renderer, False)
-        col.pack_start(text_renderer, True)
-        col.add_attribute(icon_renderer, 'icon-name', 1)
-        col.add_attribute(text_renderer, 'text', 0)
-        self.tree_view.append_column(col)
+        self._local_scroll = Gtk.ScrolledWindow()
+        self._local_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
 
-        self.scroll_tree.add(self.tree_view)
+        self._local_store = Gtk.TreeStore(str, str, str, bool, bool)
+        self._local_view = Gtk.TreeView(model=self._local_store)
+        self._local_view.set_headers_visible(False)
 
-        # Quick connect dropdown (top, right after header)
-        server_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        server_row.set_margin_start(4)
-        server_row.set_margin_end(4)
-        server_row.set_margin_bottom(2)
+        local_col = Gtk.TreeViewColumn("Files")
+        local_icon = Gtk.CellRendererPixbuf()
+        local_text = Gtk.CellRendererText()
+        local_col.pack_start(local_icon, False)
+        local_col.pack_start(local_text, True)
+        local_col.add_attribute(local_icon, 'icon-name', 1)
+        local_col.add_attribute(local_text, 'text', 0)
+        self._local_view.append_column(local_col)
 
-        self.quick_btn = Gtk.MenuButton(label="Quick Connect")
-        self.quick_btn.set_tooltip_text("Quick connect to saved server")
-        self.quick_btn.set_relief(Gtk.ReliefStyle.NONE)
-        self._rebuild_quick_menu()
-        server_row.pack_start(self.quick_btn, True, True, 0)
+        self._local_view.connect('row-activated', self._on_local_tree_activated)
+        self._local_view.connect('row-expanded', self._on_local_tree_expanded)
 
-        self.files_pane.pack_start(server_row, False, False, 0)
-        self.files_pane.pack_start(self.scroll_tree, True, True, 0)
+        self._local_scroll.add(self._local_view)
+        local_box.pack_start(self._local_scroll, True, True, 0)
 
-        # Connect, Disconnect, Refresh icons (bottom)
-        conn_row.set_margin_bottom(4)
-        self.files_pane.pack_end(conn_row, False, False, 0)
+        # Local tree action bar
+        local_action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        local_action_row.set_margin_start(4)
+        local_action_row.set_margin_end(4)
+        local_action_row.set_margin_bottom(4)
+
+        btn_local_refresh = Gtk.Button()
+        btn_local_refresh.set_image(Gtk.Image.new_from_icon_name(
+            'view-refresh-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        btn_local_refresh.set_relief(Gtk.ReliefStyle.NONE)
+        btn_local_refresh.set_tooltip_text("Refresh local files")
+        btn_local_refresh.connect('clicked', self._on_local_refresh)
+        local_action_row.pack_start(btn_local_refresh, False, False, 0)
+
+        btn_local_home = Gtk.Button()
+        btn_local_home.set_image(Gtk.Image.new_from_icon_name(
+            'go-home-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        btn_local_home.set_relief(Gtk.ReliefStyle.NONE)
+        btn_local_home.set_tooltip_text("Go to home directory")
+        btn_local_home.connect('clicked', self._on_local_home)
+        local_action_row.pack_start(btn_local_home, False, False, 0)
+
+        local_box.pack_end(local_action_row, False, False, 0)
+        self._file_stack.add_named(local_box, 'local')
+
+        self._file_stack.set_visible_child_name('remote')
+        self.files_pane.pack_start(self._file_stack, True, True, 0)
 
         # Map pane IDs to widgets
         self._pane_widgets = {
@@ -2510,6 +2590,8 @@ class SynPadWindow(Gtk.Window):
         self.btn_disconnect.connect('clicked', self._on_disconnect)
         # btn_save removed — menu item handles save
         self.btn_refresh.connect('clicked', self._on_refresh)
+        self.btn_remote_tree.connect('toggled', self._on_toggle_file_view, 'remote')
+        self.btn_local_tree.connect('toggled', self._on_toggle_file_view, 'local')
         # quick_btn uses menu items with their own signals
         self.btn_theme.connect('clicked', self._on_toggle_theme)
         self.btn_console.connect('clicked', self._on_toggle_console)
@@ -4144,6 +4226,106 @@ class SynPadWindow(Gtk.Window):
             if not start_dir:
                 start_dir = self.ftp_mgr.home_dir
             self._load_tree(start_dir)
+
+    # -- Local File Tree -------------------------------------------------------
+
+    def _on_toggle_file_view(self, btn, view_name):
+        """Toggle between remote and local file trees."""
+        if not btn.get_active():
+            return
+        # Deactivate the other toggle
+        if view_name == 'remote':
+            self.btn_local_tree.handler_block_by_func(self._on_toggle_file_view)
+            self.btn_local_tree.set_active(False)
+            self.btn_local_tree.handler_unblock_by_func(self._on_toggle_file_view)
+        else:
+            self.btn_remote_tree.handler_block_by_func(self._on_toggle_file_view)
+            self.btn_remote_tree.set_active(False)
+            self.btn_remote_tree.handler_unblock_by_func(self._on_toggle_file_view)
+
+        self._file_stack.set_visible_child_name(view_name)
+
+        # Load local tree on first switch
+        if view_name == 'local' and self._local_store.get_iter_first() is None:
+            self._load_local_tree(str(Path.home()))
+
+    def _load_local_tree(self, path, parent_iter=None):
+        """Load local filesystem directory into the local tree."""
+        try:
+            entries = []
+            for name in sorted(os.listdir(path), key=str.lower):
+                if name.startswith('.'):
+                    continue
+                full = os.path.join(path, name)
+                is_dir = os.path.isdir(full)
+                entries.append((name, is_dir, full))
+        except PermissionError:
+            return
+
+        if parent_iter:
+            # Remove placeholder children
+            old = []
+            child = self._local_store.iter_children(parent_iter)
+            while child:
+                old.append(self._local_store.get_path(child))
+                child = self._local_store.iter_next(child)
+            self._local_store[parent_iter][4] = True
+        else:
+            old = None
+            self._local_store.clear()
+
+        # Sort: dirs first, then files
+        entries.sort(key=lambda x: (not x[1], x[0].lower()))
+
+        for name, is_dir, full in entries:
+            icon = 'folder' if is_dir else self._icon_for_file(name)
+            it = self._local_store.append(parent_iter, [name, icon, full, is_dir, False])
+            if is_dir:
+                self._local_store.append(it, ['Loading...', 'content-loading-symbolic', '', False, False])
+
+        if old:
+            for tp in reversed(old):
+                try:
+                    oi = self._local_store.get_iter(tp)
+                    self._local_store.remove(oi)
+                except ValueError:
+                    pass
+
+    def _on_local_tree_expanded(self, _view, tree_iter, _path):
+        """Load subdirectory on expand."""
+        is_dir = self._local_store[tree_iter][3]
+        loaded = self._local_store[tree_iter][4]
+        if is_dir and not loaded:
+            local_path = self._local_store[tree_iter][2]
+            self._load_local_tree(local_path, tree_iter)
+
+    def _on_local_tree_activated(self, _view, path, _col):
+        """Open file or toggle directory on double-click."""
+        tree_iter = self._local_store.get_iter(path)
+        is_dir = self._local_store[tree_iter][3]
+        if is_dir:
+            if self._local_view.row_expanded(path):
+                self._local_view.collapse_row(path)
+            else:
+                self._local_view.expand_row(path, False)
+        else:
+            filepath = self._local_store[tree_iter][2]
+            self._open_local_file(filepath)
+
+    def _on_local_refresh(self, _btn):
+        """Refresh the local file tree from current root."""
+        it = self._local_store.get_iter_first()
+        if it:
+            # Find the root directory from the first item's parent path
+            first_path = self._local_store[it][2]
+            root = os.path.dirname(first_path)
+        else:
+            root = str(Path.home())
+        self._load_local_tree(root)
+
+    def _on_local_home(self, _btn):
+        """Navigate local tree to home directory."""
+        self._load_local_tree(str(Path.home()))
 
     # -- Keyboard Shortcuts ---------------------------------------------------
 
