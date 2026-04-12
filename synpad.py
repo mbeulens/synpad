@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.12.2"
+APP_VERSION = "1.12.3"
 DEBUG_MODE = False
 
 import gi
@@ -1486,13 +1486,23 @@ class SynPadWindow(Gtk.Window):
         toggle_row.set_margin_end(4)
         toggle_row.set_margin_bottom(2)
 
-        self.btn_remote_tree = Gtk.ToggleButton(label="Remote")
+        self.btn_remote_tree = Gtk.ToggleButton()
+        remote_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        remote_btn_box.pack_start(Gtk.Image.new_from_icon_name(
+            'network-server-symbolic', Gtk.IconSize.SMALL_TOOLBAR), False, False, 0)
+        remote_btn_box.pack_start(Gtk.Label(label="Remote"), False, False, 0)
+        self.btn_remote_tree.add(remote_btn_box)
         self.btn_remote_tree.set_active(True)
         self.btn_remote_tree.set_relief(Gtk.ReliefStyle.NONE)
         self.btn_remote_tree.set_tooltip_text("Show remote server files")
         toggle_row.pack_start(self.btn_remote_tree, True, True, 0)
 
-        self.btn_local_tree = Gtk.ToggleButton(label="Local")
+        self.btn_local_tree = Gtk.ToggleButton()
+        local_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        local_btn_box.pack_start(Gtk.Image.new_from_icon_name(
+            'drive-harddisk-symbolic', Gtk.IconSize.SMALL_TOOLBAR), False, False, 0)
+        local_btn_box.pack_start(Gtk.Label(label="Local"), False, False, 0)
+        self.btn_local_tree.add(local_btn_box)
         self.btn_local_tree.set_active(False)
         self.btn_local_tree.set_relief(Gtk.ReliefStyle.NONE)
         self.btn_local_tree.set_tooltip_text("Show local files")
