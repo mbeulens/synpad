@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SynPad - A lightweight PHP IDE with FTP/SFTP integration for Linux."""
 
-APP_VERSION = "1.14.1"
+APP_VERSION = "1.14.2"
 DEBUG_MODE = False
 
 import gi
@@ -1911,28 +1911,31 @@ class SynPadWindow(Gtk.Window):
         lines.append(f'  <author>SynPad</author>')
         lines.append(f'  <description>Custom colors based on {base_id}</description>')
 
-        # Copy base text/background if available
+        # Copy base styles, but skip any that the user has overridden
         if base:
-            style = base.get_style('text')
-            if style:
-                fg = style.props.foreground if style.props.foreground_set else None
-                bg = style.props.background if style.props.background_set else None
-                parts = []
-                if fg and self._is_valid_color(fg):
-                    parts.append(f'foreground="{fg}"')
-                if bg and self._is_valid_color(bg):
-                    parts.append(f'background="{bg}"')
-                if parts:
-                    lines.append(f'  <style name="text" {" ".join(parts)}/>')
+            # text style
+            if 'text' not in custom:
+                style = base.get_style('text')
+                if style:
+                    fg = style.props.foreground if style.props.foreground_set else None
+                    bg = style.props.background if style.props.background_set else None
+                    parts = []
+                    if fg and self._is_valid_color(fg):
+                        parts.append(f'foreground="{fg}"')
+                    if bg and self._is_valid_color(bg):
+                        parts.append(f'background="{bg}"')
+                    if parts:
+                        lines.append(f'  <style name="text" {" ".join(parts)}/>')
 
             for default_style in ['selection', 'cursor', 'current-line',
                                   'line-numbers', 'bracket-match',
                                   'search-match']:
-                style = base.get_style(default_style)
-                if style:
-                    parts = self._style_to_attrs(style)
-                    if parts:
-                        lines.append(f'  <style name="{default_style}" {" ".join(parts)}/>')
+                if default_style not in custom:
+                    style = base.get_style(default_style)
+                    if style:
+                        parts = self._style_to_attrs(style)
+                        if parts:
+                            lines.append(f'  <style name="{default_style}" {" ".join(parts)}/>')
 
         # Apply user overrides
         for style_id, props in custom.items():
