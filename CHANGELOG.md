@@ -4,6 +4,21 @@ All notable changes to SynPad are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.13.0] - 2026-04-12
+
+### Added
+- Local file browser — toggle between Remote/Local with icons in Files pane
+- Local path bar with up button — browse anywhere on the filesystem
+- Local file tree context menu: New File, New Directory, Rename, Permissions, Delete
+- Smart file opening — text files open in editor, binary files open with system app (xdg-open)
+- File Types manager — configure which extensions open in editor (Menu > File Types)
+- ~40 default editor extensions covering code, config, and text formats
+- Remote files with non-editor extensions download and open externally
+
+### Fixed
+- Rename dialog pre-fills current name and shows "Rename" button
+- Server Manager opens with clean form
+
 ## [1.12.0] - 2026-04-12
 
 ### Added

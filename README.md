@@ -27,9 +27,14 @@ A lightweight PHP/JS IDE with FTP/SFTP integration for Linux, built with Python 
 - **GUID-based** server references — rename profiles without breaking anything
 
 ### Local Files
+- **Local file browser** — toggle between Remote/Local in the Files pane
+- **Path bar** with up button — browse anywhere on the filesystem
+- **Local file management** — create, rename, delete files/directories, chmod
 - **Open local files** (Ctrl+O) with file type filters
 - **Create new local files** (Ctrl+N)
 - **Smart Ctrl+S** — saves locally for local files, uploads for remote files
+- **Smart file opening** — text files in editor, binary files with system default app
+- **File Types manager** — configure which extensions open in the editor
 
 ### UI & Customization
 - **Dark/light theme** toggle for the entire application
