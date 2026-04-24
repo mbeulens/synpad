@@ -556,6 +556,7 @@ class EditorMixin:
 
                 # Step 1: fast mtime check (informational)
                 if tab.remote_mtime is not None:
+                    self._console_log("PUT step: checking remote mtime")
                     current_mtime = mgr.get_remote_mtime(tab.remote_path)
                     if current_mtime and current_mtime > tab.remote_mtime:
                         self._console_log(f"COMPARE mtime changed: {tab.remote_mtime} -> {current_mtime}")
@@ -734,7 +735,9 @@ class EditorMixin:
                         return
                     # RESP_OVERWRITE falls through to upload
 
+                self._console_log("PUT step: uploading")
                 mgr.upload(tab.remote_path, tab.local_path, max_mb)
+                self._console_log("PUT step: upload finished, updating stats")
                 # Update stored stats after successful upload
                 tab.remote_mtime = mgr.get_remote_mtime(tab.remote_path)
                 tab.remote_size = mgr.get_remote_size(tab.remote_path)
@@ -743,7 +746,7 @@ class EditorMixin:
                     tab.remote_hash = hashlib.sha256(f.read()).hexdigest()
                 GLib.idle_add(self._on_upload_done, tab, page_num)
             except Exception as e:
-                GLib.idle_add(self._on_upload_failed, str(e))
+                GLib.idle_add(self._on_upload_failed, f"{type(e).__name__}: {e}")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -807,7 +810,7 @@ class EditorMixin:
         self.item_save.set_sensitive(True)
         self._set_status("Upload failed")
         self._console_log(f"PUT FAILED: {err}", 'error')
-        self._show_error("Upload Failed", err)
+        self._show_error("Upload Failed", str(err))
 
     # -- Refresh --------------------------------------------------------------
 
