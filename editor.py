@@ -116,6 +116,9 @@ class EditorMixin:
 
         buf.connect('modified-changed', on_modified_changed)
 
+        # Signature help popover — shows function signature under the cursor
+        self._sighelp_attach(view, buf)
+
         # Close button — find the current page_num dynamically, not from closure
         def on_close(_btn):
             # Find the actual page number for this tab's scroll widget
