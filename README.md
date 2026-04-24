@@ -41,7 +41,8 @@ A lightweight PHP/JS IDE with FTP/SFTP integration for Linux, built with Python 
 - **Multiple color schemes** — Classic, Cobalt, Oblivion, Solarized, Tango, Yaru, and more
 - **Custom color editor** — per-element foreground, background, bold, italic with save/load
 - **Draggable resizable panes** — rearrange function list, editor, and file tree
-- **Console pane** — collapsible log of all FTP/SFTP operations with color-coded output
+- **Console pane** — collapsible log of all FTP/SFTP operations with color-coded output (toggle with F12)
+- **Single-instance mode** — opening a file from the file manager or terminal forwards it to the running window as a new tab; dirty tabs prompt before reload
 - **Version display** in title bar
 
 ## Dependencies

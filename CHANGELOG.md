@@ -4,6 +4,21 @@ All notable changes to SynPad are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.17.0] - 2026-04-24
+
+### Added
+- Single-instance mode — launching SynPad when it is already running forwards file arguments to the running window and raises it instead of starting a new process. Opening a file that is already in a tab switches to that tab; if the tab has unsaved changes, a Reload/Cancel prompt appears before replacing the buffer.
+- Desktop launcher updated to `%F` so multiple files can be opened at once from the file manager.
+- **F12** toggles the console pane (button tooltip updated to reflect the shortcut).
+- Save-path diagnostic logging — the console now prints `PUT step: …` markers around each network stage (mtime check, hash compare, upload, stats refresh).
+
+### Fixed
+- Intermittent hang when saving an FTP/SFTP file after the connection has been idle long enough for firewalls/NAT to drop the control socket. FTP now applies a 30s socket read timeout after login; SFTP sends a 30s SSH keepalive. Stale connections surface as a clear `PUT FAILED` with exception type instead of silently blocking.
+
+### Changed
+- Modular architecture — SynPad is now split across 13 files (`synpad.py`, `config.py`, `tab.py`, `symbols.py`, `completion.py`, `connection.py`, `session.py`, `local_files.py`, `compare.py`, `remote.py`, `editor.py`, `dialogs.py`, `window.py`) with mixin classes composing `SynPadWindow`. The previous monolithic version is preserved at tag `v1.15.0-monolith`.
+- `SynPadWindow` now inherits from `Gtk.ApplicationWindow` and runs under a `Gtk.Application` with `HANDLES_OPEN` set.
+
 ## [1.15.0] - 2026-04-12
 
 ### Added

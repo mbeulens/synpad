@@ -33,6 +33,12 @@ class FTPManager:
         self.ftp.connect(host, port, timeout=10)
         self.ftp.login(username, password)
         self.ftp.set_pasv(True)
+        # Apply read timeout to all subsequent commands so a half-open
+        # control connection raises instead of hanging forever.
+        try:
+            self.ftp.sock.settimeout(30)
+        except Exception:
+            pass
         self.connected = True
         # Auto-detect home directory
         try:
@@ -189,6 +195,12 @@ class SFTPManager:
                 "Install it with: pip install paramiko"
             )
         self.transport = paramiko.Transport((host, port))
+        # Keepalive keeps NAT entries alive and surfaces dead connections
+        # within ~30s instead of hanging forever on the next operation.
+        try:
+            self.transport.set_keepalive(30)
+        except Exception:
+            pass
         # Authenticate with key or password
         if key_path and os.path.isfile(key_path):
             try:

@@ -203,7 +203,7 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         self.btn_console.set_image(Gtk.Image.new_from_icon_name(
             'utilities-terminal-symbolic', Gtk.IconSize.BUTTON))
         self.btn_console.set_relief(Gtk.ReliefStyle.NONE)
-        self.btn_console.set_tooltip_text("Toggle console")
+        self.btn_console.set_tooltip_text("Toggle console (F12)")
         toolbar.pack_end(self.btn_console)
 
         # --- Build the three panes as independent widgets ---
@@ -936,6 +936,9 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
             return True
         elif ctrl and event.keyval == Gdk.KEY_g:
             self._on_goto_line()
+            return True
+        elif event.keyval == Gdk.KEY_F12:
+            self._on_toggle_console()
             return True
         elif event.keyval == Gdk.KEY_Escape:
             if self._search_window:
