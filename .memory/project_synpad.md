@@ -14,7 +14,7 @@ SynPad is a lightweight code editor (mini IDE) built in Python with GTK3 + GtkSo
 - Session: `~/.config/synpad/session.json`
 - Custom icon: `synpad.svg` in repo (green gradient notepad + yellow pencil)
 
-**Current version:** v1.16.0 on both dev and main
+**Current version:** v1.16.1 on dev (v1.18.0 tag exists on main from memory-only releases — running code is v1.16.1)
 **Branch:** Always work on `dev`, merge to `main` for releases
 
 **Architecture (v1.16.0):** Modular — split from monolith into 13 files:
@@ -49,6 +49,7 @@ SynPad is a lightweight code editor (mini IDE) built in Python with GTK3 + GtkSo
 - Draggable resizable panes with arrow-button reordering
 - Custom SVG icon (synpad.svg + icon.alternative.svg)
 - Version number in title bar
+- Single-instance mode (v1.16.1) — second launches forward files to the running window via Gtk.Application + HANDLES_OPEN; dirty tabs prompt on re-open with Reload/Cancel
 
 **Git config:** user=mbeulens, email=m.beulens@syntec-it.nl
 
