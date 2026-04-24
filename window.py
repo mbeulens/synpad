@@ -20,12 +20,12 @@ from dialogs import DialogsMixin
 from session import SessionMixin
 
 
-class SynPadWindow(Gtk.Window, EditorMixin, RemoteMixin, LocalFilesMixin,
+class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMixin,
                    CompareMixin, DialogsMixin, SessionMixin):
     """Main application window."""
 
-    def __init__(self):
-        super().__init__(title="SynPad - PHP IDE")
+    def __init__(self, application=None):
+        super().__init__(application=application, title="SynPad - PHP IDE")
         self.set_default_size(1200, 750)
         self.config = load_config()
         self.ftp_mgr = None  # set on connect (FTPManager or SFTPManager)

@@ -47,8 +47,7 @@ class SynPadApplication(Gtk.Application):
     def do_activate(self):
         from window import SynPadWindow
         if self.window is None:
-            self.window = SynPadWindow()
-            self.add_window(self.window)
+            self.window = SynPadWindow(application=self)
             self.window.show_all()
         else:
             self.window.present_with_time(Gtk.get_current_event_time())
