@@ -1,3 +1,4 @@
-- [SynPad project](project_synpad.md) — GTK3 Python IDE with FTP/SFTP, v1.14.2, GitHub mbeulens/synpad
+- [SynPad project](project_synpad.md) — GTK3 Python IDE with FTP/SFTP, GitHub mbeulens/synpad
 - [User profile](user_profile.md) — Lenovo gaming laptop, Linux+Windows dual workflow, Python GTK dev
 - [Versioning workflow](feedback_versioning.md) — Every synpad.py change: bump patch, commit dev, push. Minor/major: merge to main + tag
+- [Sync memory to repo](feedback_sync_memory_to_repo.md) — On memory change: copy to repo/.memory/, commit, push
