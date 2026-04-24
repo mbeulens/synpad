@@ -236,7 +236,7 @@ class SignatureHelpMixin:
         for i, p in enumerate(params):
             esc = GLib.markup_escape_text(p)
             if i == param_index:
-                pieces.append(f'<b>{esc}</b>')
+                pieces.append(f'<span foreground="#2196F3">{esc}</span>')
             else:
                 pieces.append(esc)
         return '(' + ', '.join(pieces) + ')' + GLib.markup_escape_text(rest)
