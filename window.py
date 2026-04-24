@@ -20,12 +20,12 @@ from dialogs import DialogsMixin
 from session import SessionMixin
 
 
-class SynPadWindow(Gtk.Window, EditorMixin, RemoteMixin, LocalFilesMixin,
+class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMixin,
                    CompareMixin, DialogsMixin, SessionMixin):
     """Main application window."""
 
-    def __init__(self):
-        super().__init__(title="SynPad - PHP IDE")
+    def __init__(self, application=None):
+        super().__init__(application=application, title="SynPad - PHP IDE")
         self.set_default_size(1200, 750)
         self.config = load_config()
         self.ftp_mgr = None  # set on connect (FTPManager or SFTPManager)
@@ -41,6 +41,59 @@ class SynPadWindow(Gtk.Window, EditorMixin, RemoteMixin, LocalFilesMixin,
         self._apply_css()
         self._apply_gtk_theme()
         self._restore_session()
+
+    # -- Single-instance file opening -----------------------------------------
+
+    def open_or_focus_file(self, filepath):
+        """Open filepath as a tab. If already open, switch to that tab.
+        If the matched tab is dirty, prompt the user to reload from disk."""
+        target = os.path.realpath(os.path.abspath(filepath))
+
+        for page_num, tab in self.tabs.items():
+            if not tab.is_local or not tab.local_path:
+                continue
+            existing = os.path.realpath(os.path.abspath(tab.local_path))
+            if existing == target:
+                self.notebook.set_current_page(page_num)
+                if tab.modified:
+                    self._prompt_reload_dirty_tab(tab, target)
+                return
+
+        self._open_local_file(target)
+
+    def _prompt_reload_dirty_tab(self, tab, filepath):
+        """Ask whether to reload from disk, discarding the buffer's unsaved edits."""
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text="File has unsaved changes",
+        )
+        dialog.format_secondary_text(
+            f"{filepath}\n\nReload from disk and discard your unsaved changes?"
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Reload (discard my changes)", Gtk.ResponseType.ACCEPT)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
+
+        response = dialog.run()
+        dialog.destroy()
+
+        if response == Gtk.ResponseType.ACCEPT:
+            self._reload_tab_from_disk(tab)
+
+    def _reload_tab_from_disk(self, tab):
+        """Replace the tab's buffer contents with the on-disk file, clearing dirty flag."""
+        try:
+            with open(tab.local_path, 'r', errors='replace') as f:
+                content = f.read()
+        except Exception as e:
+            self._show_error("Reload Failed", str(e))
+            return
+
+        tab.buffer.set_text(content)
+        tab.buffer.set_modified(False)
 
     # -- UI Construction ------------------------------------------------------
 
