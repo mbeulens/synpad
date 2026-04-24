@@ -42,6 +42,22 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         self._apply_gtk_theme()
         self._restore_session()
 
+    # -- Single-instance file opening -----------------------------------------
+
+    def open_or_focus_file(self, filepath):
+        """Open filepath as a tab. If already open, switch to that tab."""
+        target = os.path.realpath(os.path.abspath(filepath))
+
+        for page_num, tab in self.tabs.items():
+            if not tab.is_local or not tab.local_path:
+                continue
+            existing = os.path.realpath(os.path.abspath(tab.local_path))
+            if existing == target:
+                self.notebook.set_current_page(page_num)
+                return
+
+        self._open_local_file(target)
+
     # -- UI Construction ------------------------------------------------------
 
     def _build_ui(self):

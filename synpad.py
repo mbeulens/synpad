@@ -57,7 +57,7 @@ class SynPadApplication(Gtk.Application):
         for gio_file in files:
             path = gio_file.get_path()
             if path and os.path.isfile(path):
-                GLib.idle_add(self.window._open_local_file, path)
+                GLib.idle_add(self.window.open_or_focus_file, path)
 
 
 def main():
