@@ -39,8 +39,9 @@ class LocalFilesMixin:
             self._local_path_entry.set_text(path)
         try:
             entries = []
+            show_hidden = self.config.get('show_hidden_files', False)
             for name in sorted(os.listdir(path), key=str.lower):
-                if name.startswith('.'):
+                if name.startswith('.') and not show_hidden:
                     continue
                 full = os.path.join(path, name)
                 is_dir = os.path.isdir(full)
@@ -181,6 +182,15 @@ class LocalFilesMixin:
                 item = Gtk.MenuItem(label=f"Delete Directory '{name}'")
                 item.connect('activate', lambda _: self._on_local_delete(local_path, name, tree_iter, is_dir=True))
                 menu.append(item)
+
+                # Repo root: directory contains a `.git` child
+                child_dot_git = os.path.join(local_path, '.git')
+                if name == '.git' or os.path.isdir(child_dot_git):
+                    target = local_path if name == '.git' else child_dot_git
+                    menu.append(Gtk.SeparatorMenuItem())
+                    item = Gtk.MenuItem(label="Show git history")
+                    item.connect('activate', lambda _, t=target: self._git_show_history_local(t))
+                    menu.append(item)
             else:
                 item = Gtk.MenuItem(label=f"Rename '{name}'...")
                 item.connect('activate', lambda _: self._on_local_rename(local_path, name, tree_iter))

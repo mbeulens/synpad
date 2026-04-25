@@ -426,6 +426,12 @@ class RemoteMixin:
                 item = Gtk.MenuItem(label=f"Delete Directory '{name}'")
                 item.connect('activate', lambda _: self._on_tree_delete_dir(remote_path, tree_iter))
                 menu.append(item)
+
+                if name == '.git' and isinstance(self.ftp_mgr, SFTPManager):
+                    menu.append(Gtk.SeparatorMenuItem())
+                    item = Gtk.MenuItem(label="Show git history")
+                    item.connect('activate', lambda _: self._git_show_history_sftp(remote_path))
+                    menu.append(item)
             else:
                 # Right-clicked on a file
                 item = Gtk.MenuItem(label=f"Rename '{name}'...")

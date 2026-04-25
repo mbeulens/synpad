@@ -19,10 +19,12 @@ from compare import CompareMixin
 from dialogs import DialogsMixin
 from session import SessionMixin
 from signature_help import SignatureHelpMixin
+from git_history import GitHistoryMixin
 
 
 class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMixin,
-                   CompareMixin, DialogsMixin, SessionMixin, SignatureHelpMixin):
+                   CompareMixin, DialogsMixin, SessionMixin, SignatureHelpMixin,
+                   GitHistoryMixin):
     """Main application window."""
 
     def __init__(self, application=None):
@@ -178,6 +180,11 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         item_file_types = Gtk.MenuItem(label="File Types")
         item_file_types.connect('activate', self._on_edit_file_types)
         menu.append(item_file_types)
+
+        self._show_hidden_item = Gtk.CheckMenuItem(label="Show Hidden Files (local tree)")
+        self._show_hidden_item.set_active(self.config.get('show_hidden_files', False))
+        self._show_hidden_item.connect('toggled', self._on_toggle_show_hidden)
+        menu.append(self._show_hidden_item)
 
         self._debug_menu_item = Gtk.CheckMenuItem(label="Debug Mode")
         self._debug_menu_item.set_active(False)
@@ -470,9 +477,9 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         console_box.pack_start(
             Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
+        # Console tab
         self._console_scroll = Gtk.ScrolledWindow()
         self._console_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-
         self._console_buffer = Gtk.TextBuffer()
         self._console_view = Gtk.TextView(buffer=self._console_buffer)
         self._console_view.set_editable(False)
@@ -480,13 +487,35 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         self._console_view.set_monospace(True)
         self._console_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self._console_view.get_style_context().add_class('console-view')
-
         self._console_buffer.create_tag('timestamp', foreground='#888888')
         self._console_buffer.create_tag('error', foreground='#ef2929')
         self._console_buffer.create_tag('success', foreground='#8ae234')
-
         self._console_scroll.add(self._console_view)
-        console_box.pack_start(self._console_scroll, True, True, 0)
+
+        # Git History tab
+        git_scroll = Gtk.ScrolledWindow()
+        git_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self._git_history_buffer = Gtk.TextBuffer()
+        git_view = Gtk.TextView(buffer=self._git_history_buffer)
+        git_view.set_editable(False)
+        git_view.set_cursor_visible(False)
+        git_view.set_monospace(True)
+        git_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        git_view.get_style_context().add_class('console-view')
+        self._git_history_buffer.create_tag(
+            'git_header', foreground='#888888', weight=Pango.Weight.BOLD)
+        self._git_history_buffer.create_tag('git_hash', foreground='#f57c00')
+        self._git_history_buffer.create_tag('git_date', foreground='#8ae234')
+        self._git_history_buffer.create_tag('git_author', foreground='#2196F3')
+        self._git_history_buffer.create_tag('error', foreground='#ef2929')
+        self._git_history_buffer.create_tag('timestamp', foreground='#888888')
+        git_scroll.add(git_view)
+
+        self._console_notebook = Gtk.Notebook()
+        self._console_notebook.set_scrollable(False)
+        self._console_notebook.append_page(self._console_scroll, Gtk.Label(label="Console"))
+        self._console_notebook.append_page(git_scroll, Gtk.Label(label="Git History"))
+        console_box.pack_start(self._console_notebook, True, True, 0)
 
         self._console_pane = console_box
         self._main_vpaned.pack2(self._console_pane, resize=False, shrink=True)
@@ -869,6 +898,14 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         else:
             self._console_log("Debug mode OFF")
 
+    def _on_toggle_show_hidden(self, item):
+        self.config['show_hidden_files'] = item.get_active()
+        save_config(self.config)
+        # Reload the local tree at its current root
+        current = self._local_path_entry.get_text().strip()
+        if current and os.path.isdir(current):
+            self._load_local_tree(current)
+
     def _on_toggle_console(self, *_args):
         self._console_visible = not self._console_visible
         if self._console_visible:
@@ -881,7 +918,11 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
             self._console_pane.set_visible(False)
 
     def _on_clear_console(self, *_args):
-        self._console_buffer.set_text('')
+        page = self._console_notebook.get_current_page()
+        if page == 0:
+            self._console_buffer.set_text('')
+        elif page == 1:
+            self._git_history_buffer.set_text('')
 
     def _debug(self, message):
         import config
