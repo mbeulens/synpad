@@ -42,6 +42,26 @@ class TerminalMixin:
                     "synpad: VTE 2.91 not available; terminal tabs disabled. "
                     "Install gir1.2-vte-2.91 (apt) or vte3 (dnf/pacman).\n")
 
+    def _terminal_default_cwd(self):
+        """Best directory for a fresh terminal:
+        1. parent dir of the active editor tab (if it's a local file)
+        2. local file tree's current path
+        3. $HOME as a last resort"""
+        try:
+            page_num = self.notebook.get_current_page()
+            tab = self.tabs.get(page_num)
+            if tab and getattr(tab, 'is_local', False) and tab.local_path:
+                parent = os.path.dirname(tab.local_path)
+                if parent and os.path.isdir(parent):
+                    return parent
+        except Exception:
+            pass
+        if hasattr(self, '_local_path_entry'):
+            cwd = self._local_path_entry.get_text().strip()
+            if cwd and os.path.isdir(cwd):
+                return cwd
+        return os.path.expanduser('~')
+
     def _terminal_make_add_button(self):
         """Return a `+` button to spawn new terminals, or None if VTE missing.
         Caller packs this wherever it wants (e.g. the Tools header)."""
@@ -59,9 +79,7 @@ class TerminalMixin:
         if not HAS_VTE:
             return
 
-        cwd = self._local_path_entry.get_text().strip() if hasattr(self, '_local_path_entry') else ''
-        if not cwd or not os.path.isdir(cwd):
-            cwd = os.path.expanduser('~')
+        cwd = self._terminal_default_cwd()
         shell = os.environ.get('SHELL', '/bin/bash')
 
         term = Vte.Terminal()
