@@ -40,6 +40,7 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         self.tabs = {}  # page_num -> OpenTab
         self.current_remote_dir = '/'
         self.tmp_dir = tempfile.mkdtemp(prefix='synpad_')
+        self._tools_window = None  # set when Tools pane is detached
 
         self._build_ui()
         self._connect_signals()
@@ -488,6 +489,15 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         # Stop-Claude button (hidden until streaming)
         stop_btn = self._claude_make_stop_button()
         console_header.pack_end(stop_btn, False, False, 0)
+
+        # Detach / re-attach Tools pane
+        self._tools_dock_btn = Gtk.Button()
+        self._tools_dock_btn.set_image(Gtk.Image.new_from_icon_name(
+            'view-fullscreen-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        self._tools_dock_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self._tools_dock_btn.set_tooltip_text("Detach Tools pane to its own window")
+        self._tools_dock_btn.connect('clicked', self._on_toggle_tools_dock)
+        console_header.pack_end(self._tools_dock_btn, False, False, 0)
 
         console_box.pack_start(console_header, False, False, 0)
         console_box.pack_start(
@@ -955,6 +965,16 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
             self._load_local_tree(current)
 
     def _on_toggle_console(self, *_args):
+        # If detached, F12 toggles the detached window's visibility
+        if self._tools_window is not None:
+            if self._tools_window.is_visible():
+                self._tools_window.hide()
+                self._console_visible = False
+            else:
+                self._tools_window.show()
+                self._tools_window.present()
+                self._console_visible = True
+            return
         self._console_visible = not self._console_visible
         if self._console_visible:
             self._console_pane.set_no_show_all(False)
@@ -964,6 +984,50 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
             self._main_vpaned.set_position(alloc.height - 200)
         else:
             self._console_pane.set_visible(False)
+
+    def _on_toggle_tools_dock(self, _btn):
+        if self._tools_window is None:
+            self._tools_detach()
+        else:
+            self._tools_attach()
+
+    def _tools_detach(self):
+        if self._tools_window is not None:
+            return
+        self._main_vpaned.remove(self._console_pane)
+        win = Gtk.Window(title="SynPad — Tools")
+        win.set_default_size(800, 400)
+        win.add(self._console_pane)
+        self._console_pane.set_no_show_all(False)
+        self._console_pane.show_all()
+        win.connect('delete-event', self._on_tools_window_delete)
+        win.show_all()
+        self._tools_window = win
+        self._console_visible = True
+        self._tools_dock_btn.set_image(Gtk.Image.new_from_icon_name(
+            'view-restore-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        self._tools_dock_btn.set_tooltip_text("Re-attach Tools pane")
+
+    def _tools_attach(self):
+        if self._tools_window is None:
+            return
+        self._tools_window.remove(self._console_pane)
+        self._main_vpaned.pack2(self._console_pane, resize=False, shrink=True)
+        self._console_pane.set_no_show_all(False)
+        self._console_pane.show_all()
+        self._console_pane.set_no_show_all(True)
+        alloc = self._main_vpaned.get_allocation()
+        self._main_vpaned.set_position(max(100, alloc.height - 200))
+        self._tools_window.destroy()
+        self._tools_window = None
+        self._console_visible = True
+        self._tools_dock_btn.set_image(Gtk.Image.new_from_icon_name(
+            'view-fullscreen-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        self._tools_dock_btn.set_tooltip_text("Detach Tools pane to its own window")
+
+    def _on_tools_window_delete(self, *_args):
+        self._tools_attach()
+        return True  # we destroyed the window ourselves
 
     def _on_clear_console(self, *_args):
         page = self._console_notebook.get_current_page()
@@ -1084,6 +1148,14 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
                 return True
 
         self._save_session()
+
+        # Tear down detached Tools window if any
+        if self._tools_window is not None:
+            try:
+                self._tools_window.destroy()
+            except Exception:
+                pass
+            self._tools_window = None
 
         if self.ftp_mgr:
             self.ftp_mgr.disconnect()
