@@ -516,7 +516,9 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         self._git_history_buffer.create_tag('git_author', foreground='#2196F3')
         self._git_history_buffer.create_tag('error', foreground='#ef2929')
         self._git_history_buffer.create_tag('timestamp', foreground='#888888')
+        self._git_history_buffer.create_tag('git_hover', paragraph_background='#3c4858')
         git_scroll.add(git_view)
+        self._git_attach_click_handler(git_view)
 
         self._console_notebook = Gtk.Notebook()
         self._console_notebook.set_scrollable(False)
