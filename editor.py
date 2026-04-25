@@ -12,6 +12,7 @@ gi.require_version('GtkSource', '3.0')
 from gi.repository import Gtk, GtkSource, Gdk, GLib
 
 from config import save_config, find_server_by_guid, CONFIG_DIR
+import secrets_store
 from connection import FTPManager, SFTPManager
 from completion import SynPadCompletionProvider, DocumentWordProvider, COMPLETION_LANGS
 from symbols import SYMBOL_EXTENSIONS, parse_symbols, SYMBOL_ICONS
@@ -462,6 +463,9 @@ class EditorMixin:
             # Store pending upload info, then connect
             self._pending_upload = (tab, page_num, max_mb)
             vals = dict(srv)
+            stored_pwd = secrets_store.get_password(srv['guid'])
+            if stored_pwd is not None:
+                vals['password'] = stored_pwd
             vals['server_guid'] = srv['guid']
             vals['server_name'] = srv['name']
             vals['remember'] = True
@@ -500,6 +504,9 @@ class EditorMixin:
                 if srv:
                     self._pending_upload = (tab, page_num, max_mb)
                     vals = dict(srv)
+                    stored_pwd = secrets_store.get_password(srv['guid'])
+                    if stored_pwd is not None:
+                        vals['password'] = stored_pwd
                     vals['server_guid'] = srv['guid']
                     vals['server_name'] = srv['name']
                     vals['remember'] = True

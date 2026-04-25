@@ -50,17 +50,17 @@ A lightweight PHP/JS IDE with FTP/SFTP integration for Linux, built with Python 
 
 ### Debian/Ubuntu
 ```bash
-sudo apt install python3 python3-gi gir1.2-gtksource-3.0 python3-paramiko
+sudo apt install python3 python3-gi gir1.2-gtksource-3.0 python3-paramiko python3-secretstorage
 ```
 
 ### Fedora
 ```bash
-sudo dnf install python3-paramiko python3-gobject gtksourceview3
+sudo dnf install python3-paramiko python3-gobject gtksourceview3 python3-secretstorage
 ```
 
 ### Arch
 ```bash
-sudo pacman -S python-paramiko python-gobject gtksourceview3
+sudo pacman -S python-paramiko python-gobject gtksourceview3 python-secretstorage
 ```
 
 Or run the installer:

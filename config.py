@@ -1,6 +1,6 @@
 """SynPad configuration — paths, defaults, load/save helpers."""
 
-APP_VERSION = "1.18.1"
+APP_VERSION = "1.18.2"
 DEBUG_MODE = False
 
 import json
@@ -70,10 +70,39 @@ def load_config():
                 scheme['colors_dark'] = scheme.pop('colors')
                 scheme.setdefault('colors_light', {})
                 migrated = True
+        if _migrate_passwords_to_secret_store(cfg):
+            migrated = True
         if migrated:
             save_config(cfg)
         return cfg
     return dict(DEFAULT_CONFIG)
+
+
+def _migrate_passwords_to_secret_store(cfg):
+    """Move plaintext passwords from cfg into the OS secret store.
+    Returns True if cfg was modified. Safe to call repeatedly — only acts
+    on profiles that still have a non-empty plaintext password and a GUID."""
+    import secrets_store
+    if not secrets_store.is_available():
+        return False
+    changed = False
+    for srv in cfg.get('servers', []):
+        guid = srv.get('guid')
+        pwd = srv.get('password', '')
+        if guid and pwd and secrets_store.set_password(guid, pwd):
+            srv['password'] = ''
+            changed = True
+    # Top-level password belongs to the last-used connection
+    last_guid = cfg.get('last_server', '')
+    last_pwd = cfg.get('password', '')
+    if last_guid and last_pwd and secrets_store.set_password(last_guid, last_pwd):
+        cfg['password'] = ''
+        changed = True
+    elif last_pwd and not last_guid:
+        # No GUID to key against — clear orphaned plaintext anyway
+        cfg['password'] = ''
+        changed = True
+    return changed
 
 
 def find_server_by_guid(cfg, guid):

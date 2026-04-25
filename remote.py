@@ -11,6 +11,7 @@ from gi.repository import Gtk, Gdk, GLib
 
 from config import save_config, find_server_by_guid
 from connection import FTPManager, SFTPManager, ConnectDialog
+import secrets_store
 
 
 class RemoteMixin:
@@ -72,6 +73,9 @@ class RemoteMixin:
         srv = find_server_by_guid(self.config, server_guid)
         if srv:
             vals = dict(srv)
+            stored_pwd = secrets_store.get_password(srv['guid'])
+            if stored_pwd is not None:
+                vals['password'] = stored_pwd
             vals['remember'] = True
             vals['server_guid'] = srv['guid']
             vals['server_name'] = srv['name']
@@ -121,6 +125,8 @@ class RemoteMixin:
         server_guid = vals.get('server_guid', '')
         if not server_guid:
             server_guid = str(uuid.uuid4())
+            pwd = vals.get('password', '')
+            stored = secrets_store.set_password(server_guid, pwd) if pwd else False
             profile = {
                 'guid': server_guid,
                 'name': vals.get('host', 'Unknown'),
@@ -128,7 +134,7 @@ class RemoteMixin:
                 'host': vals['host'],
                 'port': vals['port'],
                 'username': vals['username'],
-                'password': vals['password'],
+                'password': '' if stored else pwd,
                 'ssh_key_path': vals.get('ssh_key_path', ''),
                 'home_directory': vals.get('home_directory', ''),
                 'max_upload_size_mb': vals['max_upload_size_mb'],
@@ -136,12 +142,20 @@ class RemoteMixin:
             self.config.setdefault('servers', []).append(profile)
             vals['server_guid'] = server_guid
             vals['server_name'] = profile['name']
+        else:
+            # Existing profile: refresh stored password in case user changed it
+            pwd = vals.get('password', '')
+            if pwd:
+                secrets_store.set_password(server_guid, pwd)
 
         self.current_server_guid = server_guid
         self.config['host'] = vals['host']
         self.config['port'] = vals['port']
         self.config['username'] = vals['username']
-        self.config['password'] = vals['password']
+        # Top-level 'password' is no longer persisted; secret store keyed by
+        # last_server holds it. Clear any leftover plaintext if it survived
+        # the migration (e.g. keyring was unavailable on previous launch).
+        self.config['password'] = ''
         self.config['max_upload_size_mb'] = vals['max_upload_size_mb']
         self.config['protocol'] = vals.get('protocol', 'sftp')
         self.config['ssh_key_path'] = vals.get('ssh_key_path', '')
