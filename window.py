@@ -21,11 +21,12 @@ from session import SessionMixin
 from signature_help import SignatureHelpMixin
 from git_history import GitHistoryMixin
 from terminal_tab import TerminalMixin
+from claude_tab import ClaudeMixin
 
 
 class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMixin,
                    CompareMixin, DialogsMixin, SessionMixin, SignatureHelpMixin,
-                   GitHistoryMixin, TerminalMixin):
+                   GitHistoryMixin, TerminalMixin, ClaudeMixin):
     """Main application window."""
 
     def __init__(self, application=None):
@@ -186,6 +187,10 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         self._show_hidden_item.set_active(self.config.get('show_hidden_files', False))
         self._show_hidden_item.connect('toggled', self._on_toggle_show_hidden)
         menu.append(self._show_hidden_item)
+
+        item_claude = Gtk.MenuItem(label="Ask Claude...  Ctrl+Shift+A")
+        item_claude.connect('activate', lambda _: self._claude_handle_trigger())
+        menu.append(item_claude)
 
         self._debug_menu_item = Gtk.CheckMenuItem(label="Debug Mode")
         self._debug_menu_item.set_active(False)
@@ -480,6 +485,10 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         if add_term_btn is not None:
             console_header.pack_end(add_term_btn, False, False, 0)
 
+        # Stop-Claude button (hidden until streaming)
+        stop_btn = self._claude_make_stop_button()
+        console_header.pack_end(stop_btn, False, False, 0)
+
         console_box.pack_start(console_header, False, False, 0)
         console_box.pack_start(
             Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
@@ -520,6 +529,25 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         git_scroll.add(git_view)
         self._git_attach_click_handler(git_view)
 
+        # Claude tab
+        claude_scroll = Gtk.ScrolledWindow()
+        claude_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        claude_buffer = Gtk.TextBuffer()
+        claude_view = Gtk.TextView(buffer=claude_buffer)
+        claude_view.set_editable(False)
+        claude_view.set_cursor_visible(False)
+        claude_view.set_monospace(True)
+        claude_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        claude_view.get_style_context().add_class('console-view')
+        claude_buffer.create_tag(
+            'claude_header_you', foreground='#888888', weight=Pango.Weight.BOLD)
+        claude_buffer.create_tag(
+            'claude_header_claude', foreground='#2196F3', weight=Pango.Weight.BOLD)
+        claude_buffer.create_tag('claude_dim', foreground='#999999')
+        claude_buffer.create_tag('error', foreground='#ef2929')
+        claude_scroll.add(claude_view)
+        self._claude_attach_view(claude_view, claude_buffer)
+
         self._console_notebook = Gtk.Notebook()
         self._console_notebook.set_scrollable(False)
         self._console_notebook.append_page(
@@ -530,6 +558,11 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
             self._make_tab_label_file(
                 os.path.join(os.path.dirname(__file__), 'icons', 'git.svg'),
                 "Git History"))
+        self._console_notebook.append_page(
+            claude_scroll,
+            self._make_tab_label_file(
+                os.path.join(os.path.dirname(__file__), 'icons', 'claude.svg'),
+                "Claude"))
         console_box.pack_start(self._console_notebook, True, True, 0)
 
         self._console_pane = console_box
@@ -938,6 +971,8 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
             self._console_buffer.set_text('')
         elif page == 1:
             self._git_history_buffer.set_text('')
+        elif page == 2 and self._claude_buffer is not None:
+            self._claude_buffer.set_text('')
 
     def _make_tab_label_icon(self, icon_name, text):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -1019,6 +1054,10 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
             return True
         elif event.keyval == Gdk.KEY_F12:
             self._on_toggle_console()
+            return True
+        elif (ctrl and (event.state & Gdk.ModifierType.SHIFT_MASK)
+              and event.keyval in (Gdk.KEY_A, Gdk.KEY_a)):
+            self._claude_handle_trigger()
             return True
         elif event.keyval == Gdk.KEY_Escape:
             if self._search_window:

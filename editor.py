@@ -120,6 +120,9 @@ class EditorMixin:
         # Signature help popover — shows function signature under the cursor
         self._sighelp_attach(view, buf)
 
+        # Right-click → "Ask Claude" submenu (presets + Custom)
+        view.connect('populate-popup', self._on_editor_populate_popup)
+
         # Close button — find the current page_num dynamically, not from closure
         def on_close(_btn):
             # Find the actual page number for this tab's scroll widget
@@ -1414,6 +1417,24 @@ class EditorMixin:
         lines.append(f'{indent} */')
 
         return '\n'.join(lines)
+
+    def _on_editor_populate_popup(self, _view, popup):
+        """Add 'Ask Claude' submenu to the editor's right-click context menu."""
+        from claude_tab import PRESETS
+        if not isinstance(popup, Gtk.Menu):
+            return
+        popup.append(Gtk.SeparatorMenuItem())
+        ask_item = Gtk.MenuItem(label="Ask Claude")
+        submenu = Gtk.Menu()
+        for key, label, _prompt in PRESETS:
+            sub_item = Gtk.MenuItem(label=label)
+            sub_item.connect(
+                'activate',
+                lambda _w, k=key: self._claude_handle_trigger(k))
+            submenu.append(sub_item)
+        ask_item.set_submenu(submenu)
+        popup.append(ask_item)
+        popup.show_all()
 
     def _on_editor_key_press(self, _view, event):
         """Intercept keys on the source view before GtkSourceView handles them."""
