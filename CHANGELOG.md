@@ -4,6 +4,13 @@ All notable changes to SynPad are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.18.0] - 2026-04-25
+
+### Added
+- Signature help popover — when the cursor is inside a function call, a small popover under the cursor shows the function signature and highlights the current parameter in blue. Supports PHP and JS/TS, advances on `,`, hides on `)` / focus loss / unknown function.
+- PHP completion coverage expanded from ~267 hand-written entries to **1024**, by importing signatures from [JetBrains phpstorm-stubs](https://github.com/JetBrains/phpstorm-stubs). Hand-written entries still override generated ones, so locally tweaked signatures are preserved.
+- New tool: `tools/gen_php_completions.py` — downloads phpstorm-stubs and regenerates `completion_php_generated.py`. Run whenever you want to refresh coverage for a newer PHP version. Covers Core + standard + PDO + mbstring + curl + date + json + fileinfo + pcre + mysqli.
+
 ## [1.17.0] - 2026-04-24
 
 ### Added

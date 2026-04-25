@@ -18,10 +18,11 @@ from local_files import LocalFilesMixin
 from compare import CompareMixin
 from dialogs import DialogsMixin
 from session import SessionMixin
+from signature_help import SignatureHelpMixin
 
 
 class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMixin,
-                   CompareMixin, DialogsMixin, SessionMixin):
+                   CompareMixin, DialogsMixin, SessionMixin, SignatureHelpMixin):
     """Main application window."""
 
     def __init__(self, application=None):

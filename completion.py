@@ -150,6 +150,18 @@ PHP_COMPLETIONS = {
     'DateTimeImmutable': None,
 }
 
+# Merge in generated signatures from JetBrains phpstorm-stubs. Generated set
+# is the base; hand-written entries above override any overlap so local
+# tweaks are preserved. Regenerate with tools/gen_php_completions.py.
+try:
+    from completion_php_generated import PHP_GENERATED as _PHP_GENERATED
+    _merged = dict(_PHP_GENERATED)
+    _merged.update(PHP_COMPLETIONS)
+    PHP_COMPLETIONS = _merged
+    del _merged, _PHP_GENERATED
+except ImportError:
+    pass
+
 JS_COMPLETIONS = {
     # Keywords (no hints)
     'abstract': None, 'arguments': None, 'async': None, 'await': None,
