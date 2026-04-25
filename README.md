@@ -6,7 +6,8 @@ A lightweight PHP/JS IDE with FTP/SFTP integration for Linux, built with Python 
 
 ### Editor
 - **Syntax highlighting** for PHP, JS, TS, Python, HTML, CSS, JSON, SQL, YAML, Markdown, and more
-- **Code completion** for PHP and JS/TS with function signatures and type hints
+- **Code completion** for PHP (1024+ functions, sourced from JetBrains phpstorm-stubs) and JS/TS with function signatures and type hints
+- **Signature help popover** — shows the function signature under the cursor while typing inside a call, with the current parameter highlighted
 - **Docblock generation** — type `/**` above a function and press Tab to auto-generate PHPDoc or JSDoc
 - **Function outline** pane with click-to-navigate
 - **Find & Replace** with match case and regex support (Ctrl+F / Ctrl+R)
