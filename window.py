@@ -462,7 +462,7 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         console_header.set_margin_bottom(2)
 
         lbl = Gtk.Label()
-        lbl.set_markup("<b>Console</b>")
+        lbl.set_markup("<b>Tools</b>")
         console_header.pack_start(lbl, False, False, 0)
 
         btn_clear_console = Gtk.Button()
@@ -513,8 +513,14 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
 
         self._console_notebook = Gtk.Notebook()
         self._console_notebook.set_scrollable(False)
-        self._console_notebook.append_page(self._console_scroll, Gtk.Label(label="Console"))
-        self._console_notebook.append_page(git_scroll, Gtk.Label(label="Git History"))
+        self._console_notebook.append_page(
+            self._console_scroll,
+            self._make_tab_label_icon('utilities-terminal-symbolic', "Console"))
+        self._console_notebook.append_page(
+            git_scroll,
+            self._make_tab_label_file(
+                os.path.join(os.path.dirname(__file__), 'icons', 'git.svg'),
+                "Git History"))
         console_box.pack_start(self._console_notebook, True, True, 0)
 
         self._console_pane = console_box
@@ -923,6 +929,29 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
             self._console_buffer.set_text('')
         elif page == 1:
             self._git_history_buffer.set_text('')
+
+    def _make_tab_label_icon(self, icon_name, text):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(
+            Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU),
+            False, False, 0)
+        box.pack_start(Gtk.Label(label=text), False, False, 0)
+        box.show_all()
+        return box
+
+    def _make_tab_label_file(self, path, text):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        try:
+            from gi.repository import GdkPixbuf
+            pix = GdkPixbuf.Pixbuf.new_from_file_at_size(path, 16, 16)
+            img = Gtk.Image.new_from_pixbuf(pix)
+        except Exception:
+            img = Gtk.Image.new_from_icon_name('image-missing-symbolic',
+                                                Gtk.IconSize.MENU)
+        box.pack_start(img, False, False, 0)
+        box.pack_start(Gtk.Label(label=text), False, False, 0)
+        box.show_all()
+        return box
 
     def _debug(self, message):
         import config
