@@ -22,19 +22,21 @@ case $PKG in
     apt)
         sudo apt update
         sudo apt install -y python3 python3-gi python3-venv \
-            gir1.2-gtksource-3.0 python3-paramiko python3-secretstorage
+            gir1.2-gtksource-3.0 gir1.2-vte-2.91 \
+            python3-paramiko python3-secretstorage
         ;;
     dnf)
         sudo dnf install -y python3 python3-gobject python3-paramiko \
-            gtksourceview3 python3-secretstorage
+            gtksourceview3 vte291 python3-secretstorage
         ;;
     pacman)
         sudo pacman -S --needed python python-gobject python-paramiko \
-            gtksourceview3 python-secretstorage
+            gtksourceview3 vte3 python-secretstorage
         ;;
     *)
         echo "Unknown package manager. Install manually:"
-        echo "  python3, python3-gi, gir1.2-gtksource-3.0, python3-paramiko, python3-secretstorage"
+        echo "  python3, python3-gi, gir1.2-gtksource-3.0, gir1.2-vte-2.91,"
+        echo "  python3-paramiko, python3-secretstorage"
         exit 1
         ;;
 esac

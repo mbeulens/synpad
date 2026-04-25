@@ -20,11 +20,12 @@ from dialogs import DialogsMixin
 from session import SessionMixin
 from signature_help import SignatureHelpMixin
 from git_history import GitHistoryMixin
+from terminal_tab import TerminalMixin
 
 
 class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMixin,
                    CompareMixin, DialogsMixin, SessionMixin, SignatureHelpMixin,
-                   GitHistoryMixin):
+                   GitHistoryMixin, TerminalMixin):
     """Main application window."""
 
     def __init__(self, application=None):
@@ -472,6 +473,12 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         btn_clear_console.set_tooltip_text("Clear console")
         btn_clear_console.connect('clicked', self._on_clear_console)
         console_header.pack_end(btn_clear_console, False, False, 0)
+
+        # New-terminal button (only present when VTE is available)
+        self._terminal_init()
+        add_term_btn = self._terminal_make_add_button()
+        if add_term_btn is not None:
+            console_header.pack_end(add_term_btn, False, False, 0)
 
         console_box.pack_start(console_header, False, False, 0)
         console_box.pack_start(
