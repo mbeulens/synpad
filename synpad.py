@@ -53,6 +53,11 @@ class SynPadApplication(Gtk.Application):
         GLib.idle_add(self._present_window)
 
     def do_command_line(self, command_line):
+        if os.environ.get('SYNPAD_FOCUS_DEBUG'):
+            args = command_line.get_arguments() or []
+            is_remote = command_line.get_is_remote()
+            print(f"[focus] do_command_line: remote={is_remote} args={args}",
+                  file=sys.stderr, flush=True)
         self.do_activate()
 
         # GTK3 only forwards the X11 desktop-startup-id to the primary
@@ -63,10 +68,7 @@ class SynPadApplication(Gtk.Application):
         # can spend it via xdg-activation.
         token = self._extract_activation_token(command_line)
         if token and self.window is not None:
-            try:
-                self.window.set_startup_id(token)
-            except Exception:
-                pass
+            self._apply_activation_token(token)
 
         args = command_line.get_arguments() or []
         cwd = command_line.get_cwd() or os.getcwd()
@@ -77,6 +79,33 @@ class SynPadApplication(Gtk.Application):
 
         GLib.idle_add(self._present_window)
         return 0
+
+    def _apply_activation_token(self, token):
+        # The Wayland focus path (gdk_wayland_window_focus →
+        # xdg_activation_v1_activate, called from gtk_window_present_with_time)
+        # spends the *display-level* startup_notification_id, not the
+        # per-window startup_id. Set both so present() can consume the token
+        # on either backend.
+        if self.window is None:
+            return
+        if os.environ.get('SYNPAD_FOCUS_DEBUG'):
+            print(f"[focus] applying token: {token[:40]}...", file=sys.stderr, flush=True)
+        try:
+            self.window.set_startup_id(token)
+        except Exception as e:
+            if os.environ.get('SYNPAD_FOCUS_DEBUG'):
+                print(f"[focus] set_startup_id failed: {e}", file=sys.stderr, flush=True)
+        try:
+            gi.require_version('GdkWayland', '3.0')
+            from gi.repository import GdkWayland
+            display = self.window.get_display()
+            if isinstance(display, GdkWayland.WaylandDisplay):
+                display.set_startup_notification_id(token)
+                if os.environ.get('SYNPAD_FOCUS_DEBUG'):
+                    print("[focus] applied to WaylandDisplay", file=sys.stderr, flush=True)
+        except Exception as e:
+            if os.environ.get('SYNPAD_FOCUS_DEBUG'):
+                print(f"[focus] WaylandDisplay path failed: {e}", file=sys.stderr, flush=True)
 
     @staticmethod
     def _extract_activation_token(command_line):
@@ -89,11 +118,17 @@ class SynPadApplication(Gtk.Application):
                 xdg_token = s.split("=", 1)[1]
             elif s.startswith("DESKTOP_STARTUP_ID="):
                 startup_id = s.split("=", 1)[1]
+        if os.environ.get('SYNPAD_FOCUS_DEBUG'):
+            print(f"[focus] env entries: {len(env_list)}, "
+                  f"xdg_token={'yes' if xdg_token else 'no'}, "
+                  f"startup_id={'yes' if startup_id else 'no'}",
+                  file=sys.stderr, flush=True)
         return xdg_token or startup_id
 
     def _present_window(self):
         if self.window is None:
             return False
+        debug = bool(os.environ.get('SYNPAD_FOCUS_DEBUG'))
         # Hint via taskbar/dock so the user notices even if the compositor
         # refuses to raise the window — typical on Wayland for CLI launches
         # whose terminal didn't acquire an XDG_ACTIVATION_TOKEN.
@@ -104,14 +139,28 @@ class SynPadApplication(Gtk.Application):
                 pass
         timestamp = 0
         gdk_window = self.window.get_window()
+        backend = "none"
         if gdk_window is not None:
             try:
                 gi.require_version('GdkX11', '3.0')
                 from gi.repository import GdkX11
                 if isinstance(gdk_window, GdkX11.X11Window):
                     timestamp = GdkX11.x11_get_server_time(gdk_window)
+                    backend = "x11"
             except Exception:
                 pass
+            if backend == "none":
+                try:
+                    gi.require_version('GdkWayland', '3.0')
+                    from gi.repository import GdkWayland
+                    if isinstance(gdk_window, GdkWayland.WaylandWindow):
+                        backend = "wayland"
+                except Exception:
+                    pass
+        if debug:
+            print(f"[focus] present: backend={backend} ts={timestamp} "
+                  f"active={self.window.is_active()}",
+                  file=sys.stderr, flush=True)
         if timestamp:
             self.window.present_with_time(timestamp)
         else:
