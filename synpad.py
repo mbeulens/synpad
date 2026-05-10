@@ -49,8 +49,7 @@ class SynPadApplication(Gtk.Application):
         if self.window is None:
             self.window = SynPadWindow(application=self)
             self.window.show_all()
-        else:
-            self.window.present_with_time(Gtk.get_current_event_time())
+        GLib.idle_add(self._present_window)
 
     def do_open(self, files, n_files, hint):
         self.do_activate()
@@ -58,6 +57,30 @@ class SynPadApplication(Gtk.Application):
             path = gio_file.get_path()
             if path and os.path.isfile(path):
                 GLib.idle_add(self.window.open_or_focus_file, path)
+        GLib.idle_add(self._present_window)
+
+    def _present_window(self):
+        # D-Bus-triggered activations have no GDK event in flight, so
+        # Gtk.get_current_event_time() returns 0 and the WM applies focus-
+        # stealing prevention. Use the X server's current timestamp on X11 so
+        # the WM accepts the focus request; fall back to present() elsewhere.
+        if self.window is None:
+            return False
+        timestamp = 0
+        gdk_window = self.window.get_window()
+        if gdk_window is not None:
+            try:
+                gi.require_version('GdkX11', '3.0')
+                from gi.repository import GdkX11
+                if isinstance(gdk_window, GdkX11.X11Window):
+                    timestamp = GdkX11.x11_get_server_time(gdk_window)
+            except Exception:
+                pass
+        if timestamp:
+            self.window.present_with_time(timestamp)
+        else:
+            self.window.present()
+        return False
 
 
 def main():
