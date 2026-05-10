@@ -41,6 +41,37 @@ class EditorMixin:
         buf.set_text(content)
         buf.set_modified(False)
 
+        # Highlight all case-sensitive matches of the current selection. Per
+        # tab, with its own SearchSettings so it doesn't collide with the
+        # global Ctrl+F context. Triggered when the selection is on a single
+        # line, has no whitespace, and is at least 2 characters long.
+        word_hl_settings = GtkSource.SearchSettings()
+        word_hl_settings.set_case_sensitive(True)
+        word_hl_settings.set_regex_enabled(False)
+        word_hl_settings.set_wrap_around(True)
+        word_hl_ctx = GtkSource.SearchContext.new(buf, word_hl_settings)
+        word_hl_ctx.set_highlight(True)
+
+        def _on_word_hl_mark_set(_buf, _iter, mark):
+            name = mark.get_name() if mark else None
+            if name not in ('insert', 'selection_bound'):
+                return
+            bounds = buf.get_selection_bounds()
+            if not bounds:
+                word_hl_settings.set_search_text(None)
+                return
+            start, end = bounds
+            if start.get_line() != end.get_line():
+                word_hl_settings.set_search_text(None)
+                return
+            text = buf.get_text(start, end, False)
+            if len(text) < 2 or any(c.isspace() for c in text):
+                word_hl_settings.set_search_text(None)
+                return
+            word_hl_settings.set_search_text(text)
+
+        buf.connect('mark-set', _on_word_hl_mark_set)
+
         # Create source view
         view = GtkSource.View.new_with_buffer(buf)
         view.set_show_line_numbers(True)
