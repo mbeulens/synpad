@@ -16,7 +16,8 @@ class SynPadApplication(Gtk.Application):
     def __init__(self):
         super().__init__(
             application_id="com.mbeulens.synpad",
-            flags=Gio.ApplicationFlags.HANDLES_OPEN,
+            flags=(Gio.ApplicationFlags.HANDLES_COMMAND_LINE
+                   | Gio.ApplicationFlags.SEND_ENVIRONMENT),
         )
         self.window = None
 
@@ -51,21 +52,56 @@ class SynPadApplication(Gtk.Application):
             self.window.show_all()
         GLib.idle_add(self._present_window)
 
-    def do_open(self, files, n_files, hint):
+    def do_command_line(self, command_line):
         self.do_activate()
-        for gio_file in files:
-            path = gio_file.get_path()
-            if path and os.path.isfile(path):
-                GLib.idle_add(self.window.open_or_focus_file, path)
+
+        # GTK3 only forwards the X11 desktop-startup-id to the primary
+        # instance via D-Bus platform-data; the Wayland XDG_ACTIVATION_TOKEN
+        # is dropped on the floor (gtk_application_before_emit gates it on
+        # GDK_IS_X11_DISPLAY). Pull whichever token the launcher set out of
+        # the secondary instance's env and apply it manually so present()
+        # can spend it via xdg-activation.
+        token = self._extract_activation_token(command_line)
+        if token and self.window is not None:
+            try:
+                self.window.set_startup_id(token)
+            except Exception:
+                pass
+
+        args = command_line.get_arguments() or []
+        cwd = command_line.get_cwd() or os.getcwd()
+        for arg in args[1:]:
+            full_path = arg if os.path.isabs(arg) else os.path.join(cwd, arg)
+            if os.path.isfile(full_path):
+                GLib.idle_add(self.window.open_or_focus_file, full_path)
+
         GLib.idle_add(self._present_window)
+        return 0
+
+    @staticmethod
+    def _extract_activation_token(command_line):
+        env_list = command_line.get_environ() or []
+        xdg_token = None
+        startup_id = None
+        for var in env_list:
+            s = var if isinstance(var, str) else var.decode('utf-8', 'replace')
+            if s.startswith("XDG_ACTIVATION_TOKEN="):
+                xdg_token = s.split("=", 1)[1]
+            elif s.startswith("DESKTOP_STARTUP_ID="):
+                startup_id = s.split("=", 1)[1]
+        return xdg_token or startup_id
 
     def _present_window(self):
-        # D-Bus-triggered activations have no GDK event in flight, so
-        # Gtk.get_current_event_time() returns 0 and the WM applies focus-
-        # stealing prevention. Use the X server's current timestamp on X11 so
-        # the WM accepts the focus request; fall back to present() elsewhere.
         if self.window is None:
             return False
+        # Hint via taskbar/dock so the user notices even if the compositor
+        # refuses to raise the window — typical on Wayland for CLI launches
+        # whose terminal didn't acquire an XDG_ACTIVATION_TOKEN.
+        if not self.window.is_active():
+            try:
+                self.window.set_urgency_hint(True)
+            except Exception:
+                pass
         timestamp = 0
         gdk_window = self.window.get_window()
         if gdk_window is not None:
