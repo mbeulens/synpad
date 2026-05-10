@@ -37,30 +37,39 @@ A lightweight PHP/JS IDE with FTP/SFTP integration for Linux, built with Python 
 - **Smart file opening** — text files in editor, binary files with system default app
 - **File Types manager** — configure which extensions open in the editor
 
+### Tools Pane
+- **FTP/SFTP console** — color-coded log of all remote operations (toggle with F12)
+- **Local terminals** — VTE-backed shell tabs with rename-in-place, smart starting directory (active tab's folder → local tree → `$HOME`)
+- **Git history** for the current local file — click a commit to open it in the browser (when `origin` is GitHub)
+- **Claude tab** — ask the local `claude -p` CLI right from the editor (**Ctrl+Shift+A**, hamburger menu, or right-click). Streaming responses render in a dedicated tab with a Stop button
+- **Detachable** — pop the Tools pane into its own top-level window and reattach at will
+
 ### UI & Customization
 - **Dark/light theme** toggle for the entire application
 - **Multiple color schemes** — Classic, Cobalt, Oblivion, Solarized, Tango, Yaru, and more
 - **Custom color editor** — per-element foreground, background, bold, italic with save/load
 - **Draggable resizable panes** — rearrange function list, editor, and file tree
-- **Console pane** — collapsible log of all FTP/SFTP operations with color-coded output (toggle with F12)
 - **Single-instance mode** — opening a file from the file manager or terminal forwards it to the running window as a new tab; dirty tabs prompt before reload
 - **Version display** in title bar
+
+### Security
+- **Keyring-stored credentials** — server profile passwords are saved via `secretstorage` (GNOME Keyring / KWallet) instead of plaintext in `config.json`
 
 ## Dependencies
 
 ### Debian/Ubuntu
 ```bash
-sudo apt install python3 python3-gi gir1.2-gtksource-3.0 python3-paramiko
+sudo apt install python3 python3-gi gir1.2-gtksource-3.0 gir1.2-vte-2.91 python3-paramiko python3-secretstorage
 ```
 
 ### Fedora
 ```bash
-sudo dnf install python3-paramiko python3-gobject gtksourceview3
+sudo dnf install python3-paramiko python3-gobject gtksourceview3 vte291 python3-secretstorage
 ```
 
 ### Arch
 ```bash
-sudo pacman -S python-paramiko python-gobject gtksourceview3
+sudo pacman -S python-paramiko python-gobject gtksourceview3 vte3 python-secretstorage
 ```
 
 Or run the installer:
@@ -108,6 +117,8 @@ StartupWMClass=synpad
 | Ctrl+G | Go to line |
 | Ctrl+W | Close tab |
 | Ctrl+Q | Quit |
+| Ctrl+Shift+A | Ask Claude about the selection |
+| F12 | Toggle Tools pane |
 | Tab (on `/**`) | Generate docblock |
 | Tab (on `///`) | Insert separator line |
 | Escape | Close search / console |

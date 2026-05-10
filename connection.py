@@ -7,6 +7,8 @@ import stat
 import uuid
 from pathlib import Path
 
+import secrets_store
+
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
@@ -565,7 +567,8 @@ class ConnectDialog(Gtk.Dialog):
             self.host_entry.set_text(srv.get('host', ''))
             self.port_entry.set_value(srv.get('port', 22))
             self.user_entry.set_text(srv.get('username', ''))
-            self.pass_entry.set_text(srv.get('password', ''))
+            stored_pwd = secrets_store.get_password(srv.get('guid', ''))
+            self.pass_entry.set_text(stored_pwd if stored_pwd is not None else srv.get('password', ''))
             self.key_entry.set_text(srv.get('ssh_key_path', ''))
             self.group_entry.set_text(srv.get('group', ''))
             self.home_entry.set_text(srv.get('home_directory', ''))
@@ -589,15 +592,20 @@ class ConnectDialog(Gtk.Dialog):
         if current_id and current_id != '__new__':
             existing_guid = current_id
 
+        guid = existing_guid or str(uuid.uuid4())
+        pwd = self.pass_entry.get_text()
+        # Store the password in the OS secret store. Keep plaintext only
+        # as a fallback when the keyring is unavailable.
+        stored = secrets_store.set_password(guid, pwd) if pwd else False
         profile = {
-            'guid': existing_guid or str(uuid.uuid4()),
+            'guid': guid,
             'name': name,
             'group': self.group_entry.get_text().strip(),
             'protocol': self.proto_combo.get_active_id(),
             'host': self.host_entry.get_text().strip(),
             'port': int(self.port_entry.get_value()),
             'username': self.user_entry.get_text().strip(),
-            'password': self.pass_entry.get_text(),
+            'password': '' if stored else pwd,
             'ssh_key_path': self.key_entry.get_text().strip(),
             'home_directory': self.home_entry.get_text().strip(),
             'max_upload_size_mb': int(self.size_entry.get_value()),
@@ -642,6 +650,7 @@ class ConnectDialog(Gtk.Dialog):
 
         servers = self.config.get('servers', [])
         self.config['servers'] = [s for s in servers if s.get('guid') != server_id]
+        secrets_store.delete_password(server_id)
         save_config(self.config)
         self._rebuild_server_combo()
         self.server_combo.set_active_id('__new__')

@@ -19,10 +19,14 @@ from compare import CompareMixin
 from dialogs import DialogsMixin
 from session import SessionMixin
 from signature_help import SignatureHelpMixin
+from git_history import GitHistoryMixin
+from terminal_tab import TerminalMixin
+from claude_tab import ClaudeMixin
 
 
 class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMixin,
-                   CompareMixin, DialogsMixin, SessionMixin, SignatureHelpMixin):
+                   CompareMixin, DialogsMixin, SessionMixin, SignatureHelpMixin,
+                   GitHistoryMixin, TerminalMixin, ClaudeMixin):
     """Main application window."""
 
     def __init__(self, application=None):
@@ -36,6 +40,7 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         self.tabs = {}  # page_num -> OpenTab
         self.current_remote_dir = '/'
         self.tmp_dir = tempfile.mkdtemp(prefix='synpad_')
+        self._tools_window = None  # set when Tools pane is detached
 
         self._build_ui()
         self._connect_signals()
@@ -178,6 +183,15 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         item_file_types = Gtk.MenuItem(label="File Types")
         item_file_types.connect('activate', self._on_edit_file_types)
         menu.append(item_file_types)
+
+        self._show_hidden_item = Gtk.CheckMenuItem(label="Show Hidden Files (local tree)")
+        self._show_hidden_item.set_active(self.config.get('show_hidden_files', False))
+        self._show_hidden_item.connect('toggled', self._on_toggle_show_hidden)
+        menu.append(self._show_hidden_item)
+
+        item_claude = Gtk.MenuItem(label="Ask Claude...  Ctrl+Shift+A")
+        item_claude.connect('activate', lambda _: self._claude_handle_trigger())
+        menu.append(item_claude)
 
         self._debug_menu_item = Gtk.CheckMenuItem(label="Debug Mode")
         self._debug_menu_item.set_active(False)
@@ -455,7 +469,7 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         console_header.set_margin_bottom(2)
 
         lbl = Gtk.Label()
-        lbl.set_markup("<b>Console</b>")
+        lbl.set_markup("<b>Tools</b>")
         console_header.pack_start(lbl, False, False, 0)
 
         btn_clear_console = Gtk.Button()
@@ -466,13 +480,32 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         btn_clear_console.connect('clicked', self._on_clear_console)
         console_header.pack_end(btn_clear_console, False, False, 0)
 
+        # New-terminal button (only present when VTE is available)
+        self._terminal_init()
+        add_term_btn = self._terminal_make_add_button()
+        if add_term_btn is not None:
+            console_header.pack_end(add_term_btn, False, False, 0)
+
+        # Stop-Claude button (hidden until streaming)
+        stop_btn = self._claude_make_stop_button()
+        console_header.pack_end(stop_btn, False, False, 0)
+
+        # Detach / re-attach Tools pane
+        self._tools_dock_btn = Gtk.Button()
+        self._tools_dock_btn.set_image(Gtk.Image.new_from_icon_name(
+            'view-fullscreen-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        self._tools_dock_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self._tools_dock_btn.set_tooltip_text("Detach Tools pane to its own window")
+        self._tools_dock_btn.connect('clicked', self._on_toggle_tools_dock)
+        console_header.pack_end(self._tools_dock_btn, False, False, 0)
+
         console_box.pack_start(console_header, False, False, 0)
         console_box.pack_start(
             Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
+        # Console tab
         self._console_scroll = Gtk.ScrolledWindow()
         self._console_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-
         self._console_buffer = Gtk.TextBuffer()
         self._console_view = Gtk.TextView(buffer=self._console_buffer)
         self._console_view.set_editable(False)
@@ -480,13 +513,67 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         self._console_view.set_monospace(True)
         self._console_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self._console_view.get_style_context().add_class('console-view')
-
         self._console_buffer.create_tag('timestamp', foreground='#888888')
         self._console_buffer.create_tag('error', foreground='#ef2929')
         self._console_buffer.create_tag('success', foreground='#8ae234')
-
         self._console_scroll.add(self._console_view)
-        console_box.pack_start(self._console_scroll, True, True, 0)
+
+        # Git History tab
+        git_scroll = Gtk.ScrolledWindow()
+        git_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self._git_history_buffer = Gtk.TextBuffer()
+        git_view = Gtk.TextView(buffer=self._git_history_buffer)
+        git_view.set_editable(False)
+        git_view.set_cursor_visible(False)
+        git_view.set_monospace(True)
+        git_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        git_view.get_style_context().add_class('console-view')
+        self._git_history_buffer.create_tag(
+            'git_header', foreground='#888888', weight=Pango.Weight.BOLD)
+        self._git_history_buffer.create_tag('git_hash', foreground='#f57c00')
+        self._git_history_buffer.create_tag('git_date', foreground='#8ae234')
+        self._git_history_buffer.create_tag('git_author', foreground='#2196F3')
+        self._git_history_buffer.create_tag('error', foreground='#ef2929')
+        self._git_history_buffer.create_tag('timestamp', foreground='#888888')
+        self._git_history_buffer.create_tag('git_hover', paragraph_background='#3c4858')
+        git_scroll.add(git_view)
+        self._git_attach_click_handler(git_view)
+
+        # Claude tab
+        claude_scroll = Gtk.ScrolledWindow()
+        claude_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        claude_buffer = Gtk.TextBuffer()
+        claude_view = Gtk.TextView(buffer=claude_buffer)
+        claude_view.set_editable(False)
+        claude_view.set_cursor_visible(False)
+        claude_view.set_monospace(True)
+        claude_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        claude_view.get_style_context().add_class('console-view')
+        claude_buffer.create_tag(
+            'claude_header_you', foreground='#888888', weight=Pango.Weight.BOLD)
+        claude_buffer.create_tag(
+            'claude_header_claude', foreground='#2196F3', weight=Pango.Weight.BOLD)
+        claude_buffer.create_tag('claude_dim', foreground='#999999')
+        claude_buffer.create_tag('error', foreground='#ef2929')
+        claude_scroll.add(claude_view)
+        self._claude_attach_view(claude_view, claude_buffer)
+
+        self._console_notebook = Gtk.Notebook()
+        self._console_notebook.set_scrollable(False)
+        self._console_notebook.append_page(
+            self._console_scroll,
+            self._make_tab_label_icon('utilities-terminal-symbolic', "Console"))
+        self._console_notebook.append_page(
+            git_scroll,
+            self._make_tab_label_file(
+                os.path.join(os.path.dirname(__file__), 'icons', 'git.svg'),
+                "Git History"))
+        self._console_notebook.append_page(
+            claude_scroll,
+            self._make_tab_label_file(
+                os.path.join(os.path.dirname(__file__), 'icons', 'claude.svg'),
+                "Claude"))
+        console_box.pack_start(self._console_notebook, True, True, 0)
 
         self._console_pane = console_box
         self._main_vpaned.pack2(self._console_pane, resize=False, shrink=True)
@@ -869,7 +956,25 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         else:
             self._console_log("Debug mode OFF")
 
+    def _on_toggle_show_hidden(self, item):
+        self.config['show_hidden_files'] = item.get_active()
+        save_config(self.config)
+        # Reload the local tree at its current root
+        current = self._local_path_entry.get_text().strip()
+        if current and os.path.isdir(current):
+            self._load_local_tree(current)
+
     def _on_toggle_console(self, *_args):
+        # If detached, F12 toggles the detached window's visibility
+        if self._tools_window is not None:
+            if self._tools_window.is_visible():
+                self._tools_window.hide()
+                self._console_visible = False
+            else:
+                self._tools_window.show()
+                self._tools_window.present()
+                self._console_visible = True
+            return
         self._console_visible = not self._console_visible
         if self._console_visible:
             self._console_pane.set_no_show_all(False)
@@ -880,8 +985,81 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         else:
             self._console_pane.set_visible(False)
 
+    def _on_toggle_tools_dock(self, _btn):
+        if self._tools_window is None:
+            self._tools_detach()
+        else:
+            self._tools_attach()
+
+    def _tools_detach(self):
+        if self._tools_window is not None:
+            return
+        self._main_vpaned.remove(self._console_pane)
+        win = Gtk.Window(title="SynPad — Tools")
+        win.set_default_size(800, 400)
+        win.add(self._console_pane)
+        self._console_pane.set_no_show_all(False)
+        self._console_pane.show_all()
+        win.connect('delete-event', self._on_tools_window_delete)
+        win.show_all()
+        self._tools_window = win
+        self._console_visible = True
+        self._tools_dock_btn.set_image(Gtk.Image.new_from_icon_name(
+            'view-restore-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        self._tools_dock_btn.set_tooltip_text("Re-attach Tools pane")
+
+    def _tools_attach(self):
+        if self._tools_window is None:
+            return
+        self._tools_window.remove(self._console_pane)
+        self._main_vpaned.pack2(self._console_pane, resize=False, shrink=True)
+        self._console_pane.set_no_show_all(False)
+        self._console_pane.show_all()
+        self._console_pane.set_no_show_all(True)
+        alloc = self._main_vpaned.get_allocation()
+        self._main_vpaned.set_position(max(100, alloc.height - 200))
+        self._tools_window.destroy()
+        self._tools_window = None
+        self._console_visible = True
+        self._tools_dock_btn.set_image(Gtk.Image.new_from_icon_name(
+            'view-fullscreen-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
+        self._tools_dock_btn.set_tooltip_text("Detach Tools pane to its own window")
+
+    def _on_tools_window_delete(self, *_args):
+        self._tools_attach()
+        return True  # we destroyed the window ourselves
+
     def _on_clear_console(self, *_args):
-        self._console_buffer.set_text('')
+        page = self._console_notebook.get_current_page()
+        if page == 0:
+            self._console_buffer.set_text('')
+        elif page == 1:
+            self._git_history_buffer.set_text('')
+        elif page == 2 and self._claude_buffer is not None:
+            self._claude_buffer.set_text('')
+
+    def _make_tab_label_icon(self, icon_name, text):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.pack_start(
+            Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU),
+            False, False, 0)
+        box.pack_start(Gtk.Label(label=text), False, False, 0)
+        box.show_all()
+        return box
+
+    def _make_tab_label_file(self, path, text):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        try:
+            from gi.repository import GdkPixbuf
+            pix = GdkPixbuf.Pixbuf.new_from_file_at_size(path, 16, 16)
+            img = Gtk.Image.new_from_pixbuf(pix)
+        except Exception:
+            img = Gtk.Image.new_from_icon_name('image-missing-symbolic',
+                                                Gtk.IconSize.MENU)
+        box.pack_start(img, False, False, 0)
+        box.pack_start(Gtk.Label(label=text), False, False, 0)
+        box.show_all()
+        return box
 
     def _debug(self, message):
         import config
@@ -941,6 +1119,10 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         elif event.keyval == Gdk.KEY_F12:
             self._on_toggle_console()
             return True
+        elif (ctrl and (event.state & Gdk.ModifierType.SHIFT_MASK)
+              and event.keyval in (Gdk.KEY_A, Gdk.KEY_a)):
+            self._claude_handle_trigger()
+            return True
         elif event.keyval == Gdk.KEY_Escape:
             if self._search_window:
                 self._on_search_close()
@@ -966,6 +1148,14 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
                 return True
 
         self._save_session()
+
+        # Tear down detached Tools window if any
+        if self._tools_window is not None:
+            try:
+                self._tools_window.destroy()
+            except Exception:
+                pass
+            self._tools_window = None
 
         if self.ftp_mgr:
             self.ftp_mgr.disconnect()

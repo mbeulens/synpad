@@ -4,6 +4,19 @@ All notable changes to SynPad are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.19.0] - 2026-05-10
+
+### Added
+- **Tools pane** — renamed from Console pane; hosts the FTP/SFTP log alongside new tabs (terminal, git history, Claude). Each tab has its own icon. The whole pane can be detached into a separate top-level window and reattached at will.
+- **Local terminal tabs** — open one or more VTE-backed shells inside the Tools pane. New terminals spawn in the active editor tab's directory, falling back to the local tree path then `$HOME`. Tabs can be renamed in place.
+- **Git history viewer** — for the active local file, the Tools pane shows recent commits with hover hints. Clicking a commit opens it in the browser when `origin` points at GitHub.
+- **Claude integration** — invoke the local `claude -p` CLI from the editor (Hamburger menu, **Ctrl+Shift+A**, or right-click on a selection). The streaming response renders in a dedicated tab; a Stop button cancels in-flight requests.
+- **Server passwords in the keyring** — saved via `python3-secretstorage` instead of plaintext in `config.json`. Existing plaintext passwords migrate on first save.
+- **Show-hidden-files toggle** in the local file browser.
+
+### Fixed
+- Window did not come to the foreground when opening a file from the file manager or CLI on Wayland sessions. SynPad now sets `GDK_BACKEND=x11` at startup so it runs under XWayland; the X server timestamp path is honored by Mutter and the window is reliably raised. Export `GDK_BACKEND=wayland` to opt back into native Wayland.
+
 ## [1.18.0] - 2026-04-25
 
 ### Added

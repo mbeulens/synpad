@@ -12,6 +12,7 @@ gi.require_version('GtkSource', '3.0')
 from gi.repository import Gtk, GtkSource, Gdk, GLib
 
 from config import save_config, find_server_by_guid, CONFIG_DIR
+import secrets_store
 from connection import FTPManager, SFTPManager
 from completion import SynPadCompletionProvider, DocumentWordProvider, COMPLETION_LANGS
 from symbols import SYMBOL_EXTENSIONS, parse_symbols, SYMBOL_ICONS
@@ -118,6 +119,9 @@ class EditorMixin:
 
         # Signature help popover — shows function signature under the cursor
         self._sighelp_attach(view, buf)
+
+        # Right-click → "Ask Claude" submenu (presets + Custom)
+        view.connect('populate-popup', self._on_editor_populate_popup)
 
         # Close button — find the current page_num dynamically, not from closure
         def on_close(_btn):
@@ -462,6 +466,9 @@ class EditorMixin:
             # Store pending upload info, then connect
             self._pending_upload = (tab, page_num, max_mb)
             vals = dict(srv)
+            stored_pwd = secrets_store.get_password(srv['guid'])
+            if stored_pwd is not None:
+                vals['password'] = stored_pwd
             vals['server_guid'] = srv['guid']
             vals['server_name'] = srv['name']
             vals['remember'] = True
@@ -500,6 +507,9 @@ class EditorMixin:
                 if srv:
                     self._pending_upload = (tab, page_num, max_mb)
                     vals = dict(srv)
+                    stored_pwd = secrets_store.get_password(srv['guid'])
+                    if stored_pwd is not None:
+                        vals['password'] = stored_pwd
                     vals['server_guid'] = srv['guid']
                     vals['server_name'] = srv['name']
                     vals['remember'] = True
@@ -1407,6 +1417,24 @@ class EditorMixin:
         lines.append(f'{indent} */')
 
         return '\n'.join(lines)
+
+    def _on_editor_populate_popup(self, _view, popup):
+        """Add 'Ask Claude' submenu to the editor's right-click context menu."""
+        from claude_tab import PRESETS
+        if not isinstance(popup, Gtk.Menu):
+            return
+        popup.append(Gtk.SeparatorMenuItem())
+        ask_item = Gtk.MenuItem(label="Ask Claude")
+        submenu = Gtk.Menu()
+        for key, label, _prompt in PRESETS:
+            sub_item = Gtk.MenuItem(label=label)
+            sub_item.connect(
+                'activate',
+                lambda _w, k=key: self._claude_handle_trigger(k))
+            submenu.append(sub_item)
+        ask_item.set_submenu(submenu)
+        popup.append(ask_item)
+        popup.show_all()
 
     def _on_editor_key_press(self, _view, event):
         """Intercept keys on the source view before GtkSourceView handles them."""
