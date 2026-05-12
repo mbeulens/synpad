@@ -5,6 +5,8 @@ import json
 import os
 import re
 import threading
+import time
+import traceback
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -17,6 +19,24 @@ from connection import FTPManager, SFTPManager
 from completion import SynPadCompletionProvider, DocumentWordProvider, COMPLETION_LANGS
 from symbols import SYMBOL_EXTENSIONS, parse_symbols, SYMBOL_ICONS
 from tab import OpenTab
+
+
+def _hl_log(msg):
+    """Append a line to the highlight-debug log when SYNPAD_HL_DEBUG is set.
+    SYNPAD_HL_DEBUG=1 writes to /tmp/synpad-highlight.log; any other value is
+    treated as the target path. Flushed after every line so a SIGKILL or
+    forced shutdown still leaves the tail on disk."""
+    path = os.environ.get('SYNPAD_HL_DEBUG')
+    if not path:
+        return
+    if path == '1':
+        path = '/tmp/synpad-highlight.log'
+    try:
+        with open(path, 'a') as f:
+            f.write(f"{time.monotonic():.6f} {msg}\n")
+            f.flush()
+    except Exception:
+        pass
 
 
 class EditorMixin:
@@ -51,24 +71,37 @@ class EditorMixin:
         word_hl_settings.set_wrap_around(True)
         word_hl_ctx = GtkSource.SearchContext.new(buf, word_hl_settings)
         word_hl_ctx.set_highlight(True)
+        _hl_log(f"new-tab path={remote_path!r} chars={buf.get_char_count()} "
+                f"ctx_id={id(word_hl_ctx):x} settings_id={id(word_hl_settings):x}")
 
         def _on_word_hl_mark_set(_buf, _iter, mark):
-            name = mark.get_name() if mark else None
-            if name not in ('insert', 'selection_bound'):
-                return
-            bounds = buf.get_selection_bounds()
-            if not bounds:
-                word_hl_settings.set_search_text(None)
-                return
-            start, end = bounds
-            if start.get_line() != end.get_line():
-                word_hl_settings.set_search_text(None)
-                return
-            text = buf.get_text(start, end, False)
-            if len(text) < 2 or any(c.isspace() for c in text):
-                word_hl_settings.set_search_text(None)
-                return
-            word_hl_settings.set_search_text(text)
+            try:
+                name = mark.get_name() if mark else None
+                if name not in ('insert', 'selection_bound'):
+                    return
+                bounds = buf.get_selection_bounds()
+                if not bounds:
+                    _hl_log(f"mark-set {name}: no-sel -> clear "
+                            f"settings_id={id(word_hl_settings):x}")
+                    word_hl_settings.set_search_text(None)
+                    return
+                start, end = bounds
+                if start.get_line() != end.get_line():
+                    _hl_log(f"mark-set {name}: multi-line -> clear")
+                    word_hl_settings.set_search_text(None)
+                    return
+                text = buf.get_text(start, end, False)
+                if len(text) < 2 or any(c.isspace() for c in text):
+                    _hl_log(f"mark-set {name}: short/ws len={len(text)} -> clear")
+                    word_hl_settings.set_search_text(None)
+                    return
+                _hl_log(f"mark-set {name}: apply text={text[:40]!r} "
+                        f"len={len(text)} chars={buf.get_char_count()}")
+                word_hl_settings.set_search_text(text)
+                _hl_log(f"mark-set {name}: applied")
+            except Exception:
+                _hl_log("mark-set EXCEPTION:\n" + traceback.format_exc())
+                raise
 
         buf.connect('mark-set', _on_word_hl_mark_set)
 
