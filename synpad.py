@@ -61,12 +61,18 @@ class SynPadApplication(Gtk.Application):
         GLib.idle_add(self._present_window)
 
     def do_open(self, files, n_files, hint):
+        # do_activate() already queues a _present_window idle. Do NOT queue a
+        # second one after the opens: open_or_focus_file may pop a modal
+        # ("reload dirty tab?") via dialog.run(), which spins a nested main
+        # loop. A trailing present_with_time would fire inside that nested
+        # loop and re-stack the parent above the transient modal under
+        # XWayland/Mutter — leaving the dialog invisible while its modal grab
+        # is held, which looks exactly like a hang.
         self.do_activate()
         for gio_file in files:
             path = gio_file.get_path()
             if path and os.path.isfile(path):
                 GLib.idle_add(self.window.open_or_focus_file, path)
-        GLib.idle_add(self._present_window)
 
     def _present_window(self):
         if self.window is None:
