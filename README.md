@@ -11,6 +11,7 @@ A lightweight PHP/JS IDE with FTP/SFTP integration for Linux, built with Python 
 - **Docblock generation** — type `/**` above a function and press Tab to auto-generate PHPDoc or JSDoc
 - **Function outline** pane with click-to-navigate
 - **Find & Replace** with match case and regex support (Ctrl+F / Ctrl+R)
+- **Highlight matches of the selected word** — selecting a word highlights every case-sensitive match in the same buffer
 - **Go to Line** (Ctrl+G)
 - **JSON and XML** pretty print
 - **Tab management** — right-click context menu with close, close all, close all but this

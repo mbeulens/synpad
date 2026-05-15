@@ -4,6 +4,15 @@ All notable changes to SynPad are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.20.0] - 2026-05-15
+
+### Added
+- **Highlight matches of the selected word** — selecting a word in the editor highlights every case-sensitive match in the same buffer. Triggers when the selection is on a single line, has no whitespace, and is at least 2 characters long. Each tab gets its own search context, so it does not interfere with Ctrl+F highlights.
+- **`SYNPAD_HL_DEBUG` env var** — when set to `1` or a file path, logs every word-highlight mark-set event with buffer state. `1` writes to `/tmp/synpad-highlight.log`; any other value is treated as the target path. Flushed per line for crash-safety.
+
+### Fixed
+- Hard hang when opening a file from the file manager that was already open in SynPad as a **dirty tab**. `do_open` queued a second `_present_window` after the file-open idle; while the "reload from disk?" modal blocked in `dialog.run()`'s nested loop, that present fired and re-stacked the parent above the transient modal under XWayland/Mutter. The dialog stayed invisible but kept its modal grab, leaving the app frozen until killed. Removed the redundant present — `do_activate` already queues one before the open.
+
 ## [1.19.0] - 2026-05-10
 
 ### Added
