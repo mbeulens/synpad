@@ -60,6 +60,31 @@ class FTPManager:
         self.ftp = None
         self.connected = False
 
+    def is_alive(self):
+        """Cheap liveness probe via NOOP. Temporarily lowers the socket timeout
+        to 5s so a dead connection surfaces quickly instead of blocking the UI
+        for the full 30s read timeout. Flips self.connected to False on
+        detected death."""
+        if not self.connected or self.ftp is None:
+            return False
+        sock = self.ftp.sock
+        old_timeout = None
+        try:
+            if sock:
+                old_timeout = sock.gettimeout()
+                sock.settimeout(5)
+            self.ftp.voidcmd('NOOP')
+            return True
+        except Exception:
+            self.connected = False
+            return False
+        finally:
+            if sock and old_timeout is not None:
+                try:
+                    sock.settimeout(old_timeout)
+                except Exception:
+                    pass
+
     def list_dir(self, path='/'):
         """Return list of (name, is_dir) tuples for the given remote path."""
         entries = []
@@ -237,6 +262,22 @@ class SFTPManager:
         self.sftp = None
         self.transport = None
         self.connected = False
+
+    def is_alive(self):
+        """Cheap liveness probe. Paramiko's keepalive(30) will have already
+        flipped the transport to inactive within ~60s of a silent drop, so
+        this is non-blocking and catches the common 'idle-timeout' case.
+        Flips self.connected to False on detected death."""
+        if not self.connected or self.transport is None or self.sftp is None:
+            return False
+        try:
+            if not self.transport.is_active():
+                self.connected = False
+                return False
+            return True
+        except Exception:
+            self.connected = False
+            return False
 
     def list_dir(self, path='/'):
         """Return list of (name, is_dir) tuples for the given remote path."""

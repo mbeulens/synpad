@@ -187,14 +187,32 @@ class EditorMixin:
         # Right-click → "Ask Claude" submenu (presets + Custom)
         view.connect('populate-popup', self._on_editor_populate_popup)
 
-        # Close button — find the current page_num dynamically, not from closure
+        # Close button — find the current page_num dynamically, not from closure.
+        # The X handler logs unconditionally and falls back to scanning
+        # self.tabs by identity if the notebook lookup misses, so we can see
+        # what happened when a close click appears to do nothing.
         def on_close(_btn):
-            # Find the actual page number for this tab's scroll widget
             scroll_widget = tab.source_view.get_parent()
-            current_page = self.notebook.page_num(scroll_widget)
-            self._debug(f"Close X clicked: tab={os.path.basename(tab.remote_path)}, page_num={current_page}")
+            current_page = self.notebook.page_num(scroll_widget) if scroll_widget else -1
+            self._console_log(
+                f"Tab X clicked: '{os.path.basename(tab.remote_path)}' "
+                f"page_num={current_page}", 'timestamp')
+            if current_page < 0:
+                for pn, t in list(self.tabs.items()):
+                    if t is tab:
+                        current_page = pn
+                        break
+                if current_page >= 0:
+                    self._console_log(
+                        f"Tab X fallback: located tab by self.tabs scan at "
+                        f"page_num={current_page}", 'error')
             if current_page >= 0:
                 self._close_tab(current_page)
+            else:
+                self._console_log(
+                    f"Tab X close failed — tab "
+                    f"'{os.path.basename(tab.remote_path)}' not found "
+                    f"in notebook or self.tabs", 'error')
 
         close_btn.connect('clicked', on_close)
 
@@ -262,8 +280,11 @@ class EditorMixin:
     # -- Tab Context Menu -----------------------------------------------------
 
     def _on_tab_right_click(self, widget, event):
-        """Show context menu on right-click on a tab label."""
-        if event.button != 3:
+        """Right-click → context menu; middle-click → close tab.
+
+        Middle-click acts as an always-available escape hatch when the X
+        button is unreachable (e.g. captured by a stuck popover)."""
+        if event.button not in (2, 3):
             return False
 
         # Find which page this tab belongs to
@@ -276,6 +297,13 @@ class EditorMixin:
                 break
         if clicked_page is None or clicked_page not in self.tabs:
             return False
+
+        if event.button == 2:
+            self._console_log(
+                f"Tab middle-click close: page_num={clicked_page}",
+                'timestamp')
+            self._close_tab(clicked_page)
+            return True
 
         menu = Gtk.Menu()
 
@@ -564,8 +592,15 @@ class EditorMixin:
             threading.Thread(target=switch_connect, daemon=True).start()
             return
 
-        # No server switch needed — check connection
-        if not self.ftp_mgr or not self.ftp_mgr.connected:
+        # No server switch needed — check connection.
+        # is_alive() probes for silently-dropped sockets (NAT/idle timeouts)
+        # so we fall into the reconnect branch instead of hanging the upload
+        # on a dead connection.
+        was_connected = bool(self.ftp_mgr and self.ftp_mgr.connected)
+        if not self.ftp_mgr or not self.ftp_mgr.connected or not self.ftp_mgr.is_alive():
+            if was_connected:
+                self._console_log(
+                    "Connection lost — reconnecting before upload...", 'error')
             if tab_guid:
                 srv = find_server_by_guid(self.config, tab_guid)
                 if srv:
