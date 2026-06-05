@@ -1,6 +1,6 @@
 """SynPad configuration — paths, defaults, load/save helpers."""
 
-APP_VERSION = "1.20.1"
+APP_VERSION = "1.20.2"
 DEBUG_MODE = False
 
 import json
