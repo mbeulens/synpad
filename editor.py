@@ -187,14 +187,32 @@ class EditorMixin:
         # Right-click → "Ask Claude" submenu (presets + Custom)
         view.connect('populate-popup', self._on_editor_populate_popup)
 
-        # Close button — find the current page_num dynamically, not from closure
+        # Close button — find the current page_num dynamically, not from closure.
+        # The X handler logs unconditionally and falls back to scanning
+        # self.tabs by identity if the notebook lookup misses, so we can see
+        # what happened when a close click appears to do nothing.
         def on_close(_btn):
-            # Find the actual page number for this tab's scroll widget
             scroll_widget = tab.source_view.get_parent()
-            current_page = self.notebook.page_num(scroll_widget)
-            self._debug(f"Close X clicked: tab={os.path.basename(tab.remote_path)}, page_num={current_page}")
+            current_page = self.notebook.page_num(scroll_widget) if scroll_widget else -1
+            self._console_log(
+                f"Tab X clicked: '{os.path.basename(tab.remote_path)}' "
+                f"page_num={current_page}", 'timestamp')
+            if current_page < 0:
+                for pn, t in list(self.tabs.items()):
+                    if t is tab:
+                        current_page = pn
+                        break
+                if current_page >= 0:
+                    self._console_log(
+                        f"Tab X fallback: located tab by self.tabs scan at "
+                        f"page_num={current_page}", 'error')
             if current_page >= 0:
                 self._close_tab(current_page)
+            else:
+                self._console_log(
+                    f"Tab X close failed — tab "
+                    f"'{os.path.basename(tab.remote_path)}' not found "
+                    f"in notebook or self.tabs", 'error')
 
         close_btn.connect('clicked', on_close)
 
@@ -247,6 +265,13 @@ class EditorMixin:
             welcome.show()
             self.notebook.append_page(welcome, Gtk.Label(label="Welcome"))
 
+    def _setup_tab_reordering(self):
+        # Tabs are reorderable (set_tab_reorderable in add_tab). self.tabs is
+        # keyed by page index, so a drag must re-sync it or save/close resolve
+        # the wrong tab by stale index. _reindex_tabs rebuilds it by widget id.
+        self.notebook.connect('page-reordered',
+                               lambda *_a: self._reindex_tabs())
+
     def _reindex_tabs(self):
         new_tabs = {}
         for i in range(self.notebook.get_n_pages()):
@@ -262,8 +287,11 @@ class EditorMixin:
     # -- Tab Context Menu -----------------------------------------------------
 
     def _on_tab_right_click(self, widget, event):
-        """Show context menu on right-click on a tab label."""
-        if event.button != 3:
+        """Right-click → context menu; middle-click → close tab.
+
+        Middle-click acts as an always-available escape hatch when the X
+        button is unreachable (e.g. captured by a stuck popover)."""
+        if event.button not in (2, 3):
             return False
 
         # Find which page this tab belongs to
@@ -277,7 +305,24 @@ class EditorMixin:
         if clicked_page is None or clicked_page not in self.tabs:
             return False
 
+        if event.button == 2:
+            self._console_log(
+                f"Tab middle-click close: page_num={clicked_page}",
+                'timestamp')
+            self._close_tab(clicked_page)
+            return True
+
         menu = Gtk.Menu()
+
+        tab = self.tabs[clicked_page]
+        reload_label = "Reload from Disk" if tab.is_local else "Reload from Server"
+        item_reload = Gtk.MenuItem(label=reload_label)
+        # A never-saved local tab has nothing on disk to reload from.
+        if tab.is_local and (not tab.local_path or not os.path.exists(tab.local_path)):
+            item_reload.set_sensitive(False)
+        item_reload.connect('activate', lambda _: self._confirm_then_refresh(tab))
+        menu.append(item_reload)
+        menu.append(Gtk.SeparatorMenuItem())
 
         item_close = Gtk.MenuItem(label="Close")
         item_close.connect('activate', lambda _: self._close_tab(clicked_page))
@@ -313,6 +358,122 @@ class EditorMixin:
             tab = self.tabs.get(page_num)
             if tab and tab.remote_path != keep_path:
                 self._close_tab(page_num)
+
+    # -- Reload tab contents --------------------------------------------------
+
+    def _confirm_then_refresh(self, tab):
+        """Reload a tab's contents from disk (local) or server (remote).
+        Warns and requires confirmation before discarding unsaved edits."""
+        if tab.modified:
+            src = "disk" if tab.is_local else "server"
+            dialog = Gtk.MessageDialog(
+                transient_for=self,
+                modal=True,
+                message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.NONE,
+                text="File has unsaved changes",
+            )
+            dialog.format_secondary_text(
+                f"{os.path.basename(tab.remote_path)}\n\n"
+                f"Reload from {src} and discard your unsaved changes?"
+            )
+            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dialog.add_button("Reload (discard my changes)", Gtk.ResponseType.ACCEPT)
+            dialog.set_default_response(Gtk.ResponseType.CANCEL)
+            response = dialog.run()
+            dialog.destroy()
+            if response != Gtk.ResponseType.ACCEPT:
+                return
+        self._refresh_tab(tab)
+
+    def _capture_view_state(self, tab):
+        """Snapshot cursor offset + vertical scroll so a reload can restore them."""
+        buf = tab.buffer
+        offset = buf.get_iter_at_mark(buf.get_insert()).get_offset()
+        scroll_value = 0.0
+        try:
+            vadj = tab.source_view.get_vadjustment()
+            if vadj is not None:
+                scroll_value = vadj.get_value()
+        except Exception:
+            pass
+        return offset, scroll_value
+
+    def _apply_refreshed_content(self, tab, content, offset, scroll_value):
+        """Replace buffer text and restore cursor + scroll (main thread only)."""
+        buf = tab.buffer
+        buf.set_text(content)
+        buf.set_modified(False)
+        # Clamp the cursor in case the file got shorter on disk/server.
+        offset = max(0, min(offset, buf.get_char_count()))
+        buf.place_cursor(buf.get_iter_at_offset(offset))
+
+        # Restore scroll once the view has re-laid-out with the new content.
+        def _restore_scroll():
+            try:
+                vadj = tab.source_view.get_vadjustment()
+                if vadj is not None:
+                    max_value = max(0.0, vadj.get_upper() - vadj.get_page_size())
+                    vadj.set_value(min(scroll_value, max_value))
+            except Exception:
+                pass
+            return False
+        GLib.idle_add(_restore_scroll)
+
+    def _refresh_tab(self, tab):
+        """Re-read the file behind a tab. Local reads are synchronous; remote
+        downloads run off the UI thread (the SFTP/FTP op can block)."""
+        offset, scroll_value = self._capture_view_state(tab)
+
+        if tab.is_local:
+            try:
+                with open(tab.local_path, 'r', errors='replace') as f:
+                    content = f.read()
+            except Exception as e:
+                self._show_error("Reload Failed", str(e))
+                return
+            self._apply_refreshed_content(tab, content, offset, scroll_value)
+            self._set_status(
+                f"Reloaded {os.path.basename(tab.local_path)} from disk")
+            self._console_log(f"RELOAD (disk) {tab.local_path}", 'success')
+            return
+
+        # Remote tab — needs a live connection.
+        if not self.ftp_mgr or not self.ftp_mgr.connected:
+            self._show_error("Not Connected", "Connect to the server first.")
+            return
+        remote_path = tab.remote_path
+        local_path = tab.local_path
+        mgr = self.ftp_mgr
+        self._set_status(f"Reloading {remote_path} from server...")
+        self._console_log(f"RELOAD (server) GET {remote_path}")
+
+        def work():
+            try:
+                r_mtime = mgr.get_remote_mtime(remote_path)
+                r_size = mgr.get_remote_size(remote_path)
+                mgr.download(remote_path, local_path)
+                with open(local_path, 'rb') as f:
+                    r_hash = hashlib.sha256(f.read()).hexdigest()
+                with open(local_path, 'r', errors='replace') as f:
+                    content = f.read()
+            except Exception as e:
+                GLib.idle_add(self._show_error, "Reload Failed", str(e))
+                GLib.idle_add(self._set_status, "Reload failed")
+                return
+
+            def _finish():
+                tab.remote_mtime = r_mtime
+                tab.remote_size = r_size
+                tab.remote_hash = r_hash
+                self._apply_refreshed_content(tab, content, offset, scroll_value)
+                self._set_status(
+                    f"Reloaded {os.path.basename(remote_path)} from server")
+                self._console_log(
+                    f"RELOAD (server) done: {remote_path}", 'success')
+            GLib.idle_add(_finish)
+
+        threading.Thread(target=work, daemon=True).start()
 
     # -- Open Local File ------------------------------------------------------
 
@@ -564,8 +725,15 @@ class EditorMixin:
             threading.Thread(target=switch_connect, daemon=True).start()
             return
 
-        # No server switch needed — check connection
-        if not self.ftp_mgr or not self.ftp_mgr.connected:
+        # No server switch needed — check connection.
+        # is_alive() probes for silently-dropped sockets (NAT/idle timeouts)
+        # so we fall into the reconnect branch instead of hanging the upload
+        # on a dead connection.
+        was_connected = bool(self.ftp_mgr and self.ftp_mgr.connected)
+        if not self.ftp_mgr or not self.ftp_mgr.connected or not self.ftp_mgr.is_alive():
+            if was_connected:
+                self._console_log(
+                    "Connection lost — reconnecting before upload...", 'error')
             if tab_guid:
                 srv = find_server_by_guid(self.config, tab_guid)
                 if srv:

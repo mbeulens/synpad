@@ -21,6 +21,14 @@ except ImportError:
 
 from config import find_server_by_guid, save_config
 
+# Timeouts (seconds) for SFTP channel operations. SFTP_OP_TIMEOUT caps every
+# blocking read/write so a half-open connection raises socket.timeout instead
+# of freezing the UI forever; SFTP_PROBE_TIMEOUT makes is_alive() fail fast.
+# paramiko's set_keepalive does NOT abort the transport on missed replies, so
+# without these a silently-dropped connection hangs the next operation forever.
+SFTP_OP_TIMEOUT = 30
+SFTP_PROBE_TIMEOUT = 5
+
 
 class FTPManager:
     """Handles all FTP operations."""
@@ -59,6 +67,31 @@ class FTPManager:
                     pass
         self.ftp = None
         self.connected = False
+
+    def is_alive(self):
+        """Cheap liveness probe via NOOP. Temporarily lowers the socket timeout
+        to 5s so a dead connection surfaces quickly instead of blocking the UI
+        for the full 30s read timeout. Flips self.connected to False on
+        detected death."""
+        if not self.connected or self.ftp is None:
+            return False
+        sock = self.ftp.sock
+        old_timeout = None
+        try:
+            if sock:
+                old_timeout = sock.gettimeout()
+                sock.settimeout(5)
+            self.ftp.voidcmd('NOOP')
+            return True
+        except Exception:
+            self.connected = False
+            return False
+        finally:
+            if sock and old_timeout is not None:
+                try:
+                    sock.settimeout(old_timeout)
+                except Exception:
+                    pass
 
     def list_dir(self, path='/'):
         """Return list of (name, is_dir) tuples for the given remote path."""
@@ -216,6 +249,14 @@ class SFTPManager:
         else:
             self.transport.connect(username=username, password=password)
         self.sftp = paramiko.SFTPClient.from_transport(self.transport)
+        # Cap every blocking SFTP read/write so a half-open connection raises
+        # socket.timeout instead of hanging the UI forever. Each chunk of a
+        # healthy transfer returns well within this, so it only bites on a
+        # genuinely dead peer.
+        try:
+            self.sftp.get_channel().settimeout(SFTP_OP_TIMEOUT)
+        except Exception:
+            pass
         self.connected = True
         # Auto-detect home directory (resolves '.' to absolute path)
         try:
@@ -237,6 +278,45 @@ class SFTPManager:
         self.sftp = None
         self.transport = None
         self.connected = False
+
+    def is_alive(self):
+        """Real liveness probe: a lightweight stat() round-trip with a short
+        timeout. transport.is_active() alone is insufficient — it stays True on
+        a half-open socket (paramiko sends keepalives but never disconnects on
+        missed replies), which is exactly what hangs an upload forever. We
+        temporarily lower the channel timeout to fail fast, then restore it.
+        Flips self.connected to False on detected death."""
+        if not self.connected or self.transport is None or self.sftp is None:
+            return False
+        # Quick structural check first — cheap and short-circuits a closed
+        # transport before we attempt a round-trip.
+        try:
+            if not self.transport.is_active():
+                self.connected = False
+                return False
+        except Exception:
+            self.connected = False
+            return False
+        chan = None
+        old_timeout = None
+        try:
+            chan = self.sftp.get_channel()
+            if chan is not None:
+                old_timeout = chan.gettimeout()
+                chan.settimeout(SFTP_PROBE_TIMEOUT)
+            # A stat of the home dir forces an actual request/response, so a
+            # half-open connection surfaces as socket.timeout/EOFError here.
+            self.sftp.stat(self.home_dir)
+            return True
+        except Exception:
+            self.connected = False
+            return False
+        finally:
+            if chan is not None and old_timeout is not None:
+                try:
+                    chan.settimeout(old_timeout)
+                except Exception:
+                    pass
 
     def list_dir(self, path='/'):
         """Return list of (name, is_dir) tuples for the given remote path."""

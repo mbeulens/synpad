@@ -14,7 +14,7 @@ A lightweight PHP/JS IDE with FTP/SFTP integration for Linux, built with Python 
 - **Highlight matches of the selected word** — selecting a word highlights every case-sensitive match in the same buffer
 - **Go to Line** (Ctrl+G)
 - **JSON and XML** pretty print
-- **Tab management** — right-click context menu with close, close all, close all but this
+- **Tab management** — right-click context menu with close, close all, close all but this, and reload from disk/server; tabs are reorderable by drag
 - **Session persistence** — all open tabs restore on restart, including unsaved changes
 - **Compare Tabs** — side-by-side diff view with color coding, synced scrolling, change navigation, and minimap
 

@@ -4,6 +4,16 @@ All notable changes to SynPad are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.21.0] - 2026-06-19
+
+### Added
+- **Reload from Disk/Server** — tab right-click context menu item that re-reads the active file from its source (local disk or remote server), confirming first if the tab has unsaved changes and preserving cursor and scroll position.
+
+### Fixed
+- **Tabs lost their reference after reordering.** Tabs are draggable, but the open-tabs map was keyed by notebook page index and never re-synced on a drag, so after moving a tab, Save and Close resolved the wrong tab — or none — and the dragged tab could no longer be saved or closed. Reordering now re-indexes the tab map.
+- **UI freeze when saving to a silently-dropped SFTP connection.** The SFTP channel now has a finite operation timeout and `is_alive()` does a real round-trip probe instead of trusting `transport.is_active()`, which stays `True` on a half-open socket.
+- **Saving to a dead remote no longer hangs.** Upload now detects a dead FTP/SFTP connection up front via a liveness probe and reports it instead of wedging. Added middle-click tab close and tab-close diagnostics as escape hatches.
+
 ## [1.20.0] - 2026-05-15
 
 ### Added
