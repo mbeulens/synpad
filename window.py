@@ -833,6 +833,7 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         self.tree_view.connect('row-expanded', self._on_tree_row_expanded)
         self.tree_view.connect('button-press-event', self._on_tree_right_click)
         self.notebook.connect('switch-page', self._on_tab_switched)
+        self._setup_tab_reordering()
 
     # -- Status ---------------------------------------------------------------
 

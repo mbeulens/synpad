@@ -265,6 +265,13 @@ class EditorMixin:
             welcome.show()
             self.notebook.append_page(welcome, Gtk.Label(label="Welcome"))
 
+    def _setup_tab_reordering(self):
+        # Tabs are reorderable (set_tab_reorderable in add_tab). self.tabs is
+        # keyed by page index, so a drag must re-sync it or save/close resolve
+        # the wrong tab by stale index. _reindex_tabs rebuilds it by widget id.
+        self.notebook.connect('page-reordered',
+                               lambda *_a: self._reindex_tabs())
+
     def _reindex_tabs(self):
         new_tabs = {}
         for i in range(self.notebook.get_n_pages()):
