@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+
+ TypeScript syntax definition for GtkSourceView 3.x.
+
+ TypeScript is a superset of JavaScript, so this definition reuses the
+ built-in JavaScript context (js:js) for the common syntax and adds the
+ TypeScript-specific keywords and primitive type names on top.
+
+-->
+<language id="typescript" name="TypeScript" version="2.0" _section="Script">
+  <metadata>
+    <property name="mimetypes">application/typescript;text/x-typescript</property>
+    <property name="globs">*.ts;*.mts;*.cts;*.tsx</property>
+    <property name="line-comment-start">//</property>
+    <property name="block-comment-start">/*</property>
+    <property name="block-comment-end">*/</property>
+  </metadata>
+
+  <styles>
+    <style id="keyword"      name="Keyword"      map-to="def:keyword"/>
+    <style id="type"         name="Data Type"    map-to="def:type"/>
+    <style id="built-in-type" name="Built-in Type" map-to="def:type"/>
+  </styles>
+
+  <definitions>
+    <context id="ts-keywords" style-ref="keyword">
+      <keyword>abstract</keyword>
+      <keyword>as</keyword>
+      <keyword>asserts</keyword>
+      <keyword>declare</keyword>
+      <keyword>enum</keyword>
+      <keyword>implements</keyword>
+      <keyword>infer</keyword>
+      <keyword>interface</keyword>
+      <keyword>is</keyword>
+      <keyword>keyof</keyword>
+      <keyword>namespace</keyword>
+      <keyword>override</keyword>
+      <keyword>private</keyword>
+      <keyword>protected</keyword>
+      <keyword>public</keyword>
+      <keyword>readonly</keyword>
+      <keyword>satisfies</keyword>
+      <keyword>type</keyword>
+    </context>
+
+    <context id="ts-types" style-ref="built-in-type">
+      <keyword>any</keyword>
+      <keyword>bigint</keyword>
+      <keyword>boolean</keyword>
+      <keyword>never</keyword>
+      <keyword>number</keyword>
+      <keyword>object</keyword>
+      <keyword>string</keyword>
+      <keyword>symbol</keyword>
+      <keyword>unknown</keyword>
+      <keyword>void</keyword>
+    </context>
+
+    <context id="typescript" class="no-spell-check">
+      <include>
+        <context ref="ts-keywords"/>
+        <context ref="ts-types"/>
+        <context ref="js:js"/>
+      </include>
+    </context>
+  </definitions>
+</language>

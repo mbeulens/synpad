@@ -21,6 +21,27 @@ from symbols import SYMBOL_EXTENSIONS, parse_symbols, SYMBOL_ICONS
 from tab import OpenTab
 
 
+_LANG_PATH_REGISTERED = False
+
+
+def _register_bundled_languages(lang_mgr):
+    """Prepend SynPad's bundled language-specs dir to the LanguageManager
+    search path so app-shipped syntax definitions (e.g. typescript.lang) are
+    found. GtkSourceView 3.x ships most specs compiled into the library and
+    has no TypeScript definition, so .ts files would otherwise be unhighlighted.
+    Idempotent — the default LanguageManager is a singleton."""
+    global _LANG_PATH_REGISTERED
+    if _LANG_PATH_REGISTERED:
+        return
+    spec_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'language-specs')
+    if os.path.isdir(spec_dir):
+        path = lang_mgr.get_search_path()
+        if spec_dir not in path:
+            lang_mgr.set_search_path([spec_dir] + path)
+    _LANG_PATH_REGISTERED = True
+
+
 def _hl_log(msg):
     """Append a line to the highlight-debug log when SYNPAD_HL_DEBUG is set.
     SYNPAD_HL_DEBUG=1 writes to /tmp/synpad-highlight.log; any other value is
@@ -46,6 +67,7 @@ class EditorMixin:
                            is_local=False, server_guid=''):
         # Create source buffer with language
         lang_mgr = GtkSource.LanguageManager.get_default()
+        _register_bundled_languages(lang_mgr)
         lang = self._detect_language(lang_mgr, remote_path)
 
         buf = GtkSource.Buffer()
@@ -223,6 +245,7 @@ class EditorMixin:
         ext = filepath.rsplit('.', 1)[-1].lower() if '.' in filepath else ''
         mapping = {
             'php': 'php', 'js': 'js', 'ts': 'typescript',
+            'tsx': 'typescript', 'mts': 'typescript', 'cts': 'typescript',
             'py': 'python3', 'html': 'html', 'htm': 'html',
             'css': 'css', 'json': 'json', 'xml': 'xml',
             'sql': 'sql', 'sh': 'sh', 'bash': 'sh',
