@@ -1,7 +1,16 @@
 """SynPad configuration — paths, defaults, load/save helpers."""
 
-APP_VERSION = "1.21.1"
+APP_VERSION = "1.21.2"
 DEBUG_MODE = False
+
+# Longest line (in characters) SynPad will syntax-highlight. GtkSourceView 3.x
+# highlights and lays out text per line at roughly O(n^2) in line length, so a
+# single very long line — minified JS/CSS, or a one-line JSON blob like a
+# Postman collection export — blocks the GTK main loop for a minute or more at
+# open. Measured: 10k chars 0.11s, 40k 2.0s, 160k 22s, 350k 86s. Files with a
+# longer line open unhighlighted; highlighting can be switched on per tab from
+# the tab's right-click menu.
+MAX_HIGHLIGHT_LINE_LEN = 10000
 
 import json
 import os

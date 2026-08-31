@@ -13,7 +13,8 @@ gi.require_version('Gtk', '3.0')
 gi.require_version('GtkSource', '3.0')
 from gi.repository import Gtk, GtkSource, Gdk, GLib
 
-from config import save_config, find_server_by_guid, CONFIG_DIR
+from config import (save_config, find_server_by_guid, CONFIG_DIR,
+                    MAX_HIGHLIGHT_LINE_LEN)
 import secrets_store
 from connection import FTPManager, SFTPManager
 from completion import SynPadCompletionProvider, DocumentWordProvider, COMPLETION_LANGS
@@ -40,6 +41,32 @@ def _register_bundled_languages(lang_mgr):
         if spec_dir not in path:
             lang_mgr.set_search_path([spec_dir] + path)
     _LANG_PATH_REGISTERED = True
+
+
+def max_line_length(content):
+    """Length in characters of the longest line in content."""
+    if not content:
+        return 0
+    return max(len(line) for line in content.split('\n'))
+
+
+def syntax_highlight_allowed(content):
+    """False when a line is long enough that GtkSourceView's per-line
+    highlighting would freeze the UI at open. See MAX_HIGHLIGHT_LINE_LEN."""
+    return max_line_length(content) <= MAX_HIGHLIGHT_LINE_LEN
+
+
+def apply_syntax_highlighting(buf, lang, content):
+    """Attach lang to buf and enable highlighting unless content has a line
+    long enough to stall the main loop. Returns True if highlighting is on.
+
+    The language is attached either way, so turning highlighting back on later
+    (tab right-click → Enable Syntax Highlighting) needs no language relookup."""
+    if lang:
+        buf.set_language(lang)
+    enabled = bool(lang) and syntax_highlight_allowed(content)
+    buf.set_highlight_syntax(enabled)
+    return enabled
 
 
 def _hl_log(msg):
@@ -71,9 +98,7 @@ class EditorMixin:
         lang = self._detect_language(lang_mgr, remote_path)
 
         buf = GtkSource.Buffer()
-        if lang:
-            buf.set_language(lang)
-        buf.set_highlight_syntax(True)
+        highlighted = apply_syntax_highlighting(buf, lang, content)
 
         # Set color scheme from config
         scheme = self._get_scheme()
@@ -189,6 +214,7 @@ class EditorMixin:
 
         tab = OpenTab(remote_path, local_path, view, buf,
                       is_local=is_local, server_guid=server_guid)
+        tab.highlight_suppressed = bool(lang) and not highlighted
         self.tabs[page_num] = tab
 
         # Track modification — reads tab.remote_path so renamed/saved tabs show correct name
@@ -238,7 +264,19 @@ class EditorMixin:
 
         close_btn.connect('clicked', on_close)
 
-        self._set_status(f"Opened {remote_path}")
+        if tab.highlight_suppressed:
+            longest = max_line_length(content)
+            self._set_status(
+                f"Opened {remote_path} — syntax highlighting off "
+                f"(longest line {longest:,} chars)")
+            self._console_log(
+                f"Syntax highlighting disabled for "
+                f"'{os.path.basename(remote_path)}': longest line is "
+                f"{longest:,} chars (limit {MAX_HIGHLIGHT_LINE_LEN:,}). "
+                f"Highlighting it would freeze the editor. Enable it anyway "
+                f"from the tab's right-click menu.", 'timestamp')
+        else:
+            self._set_status(f"Opened {remote_path}")
         self._update_symbols(tab)
 
     def _detect_language(self, lang_mgr, filepath):
@@ -345,6 +383,14 @@ class EditorMixin:
             item_reload.set_sensitive(False)
         item_reload.connect('activate', lambda _: self._confirm_then_refresh(tab))
         menu.append(item_reload)
+
+        # Only offered when a long line made us skip highlighting — turning it
+        # on can block the UI for a long time, so it stays an explicit choice.
+        if tab.highlight_suppressed:
+            item_hl = Gtk.MenuItem(label="Enable Syntax Highlighting (slow)")
+            item_hl.connect('activate', lambda _: self._force_highlight(tab))
+            menu.append(item_hl)
+
         menu.append(Gtk.SeparatorMenuItem())
 
         item_close = Gtk.MenuItem(label="Close")
@@ -363,6 +409,46 @@ class EditorMixin:
         menu.show_all()
         menu.popup_at_pointer(event)
         return True
+
+    def _force_highlight(self, tab):
+        """Turn syntax highlighting on for a tab where a long line suppressed it.
+
+        Confirms first: GtkSourceView's per-line cost means this can lock the UI
+        for a minute or more on the very files that triggered the guard."""
+        buf = tab.buffer
+        longest = max_line_length(
+            buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True))
+        dlg = Gtk.MessageDialog(
+            transient_for=self, modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text="Enable syntax highlighting?",
+        )
+        dlg.format_secondary_text(
+            f"{os.path.basename(tab.remote_path)} has a line of {longest:,} "
+            f"characters. Highlighting it may freeze SynPad for a long time "
+            f"and cannot be interrupted.\n\nEnable anyway?"
+        )
+        resp = dlg.run()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.OK:
+            return
+
+        self._set_status(
+            f"Highlighting {os.path.basename(tab.remote_path)} — this may take a while...")
+        # Let the status text paint before the main loop stalls.
+        while Gtk.events_pending():
+            Gtk.main_iteration_do(False)
+
+        started = time.monotonic()
+        buf.set_highlight_syntax(True)
+        tab.highlight_suppressed = False
+        self._console_log(
+            f"Syntax highlighting forced on for "
+            f"'{os.path.basename(tab.remote_path)}' "
+            f"(longest line {longest:,} chars) after "
+            f"{time.monotonic() - started:.1f}s", 'timestamp')
+        self._set_status(f"Highlighting enabled for {os.path.basename(tab.remote_path)}")
 
     def _close_all_tabs(self):
         """Close all open tabs."""
@@ -425,6 +511,10 @@ class EditorMixin:
     def _apply_refreshed_content(self, tab, content, offset, scroll_value):
         """Replace buffer text and restore cursor + scroll (main thread only)."""
         buf = tab.buffer
+        # Re-evaluate highlighting: the reloaded content may have gained (or
+        # lost) a line long enough to stall the main loop.
+        highlighted = apply_syntax_highlighting(buf, buf.get_language(), content)
+        tab.highlight_suppressed = bool(buf.get_language()) and not highlighted
         buf.set_text(content)
         buf.set_modified(False)
         # Clamp the cursor in case the file got shorter on disk/server.

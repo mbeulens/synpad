@@ -16,3 +16,6 @@ class OpenTab:
         self.remote_mtime = None  # remote file mtime when opened/last saved
         self.remote_size = None   # remote file size when opened/last saved
         self.remote_hash = None   # SHA256 of remote content when opened/last saved
+        # True when a very long line made SynPad skip syntax highlighting for
+        # this tab (see MAX_HIGHLIGHT_LINE_LEN); the tab menu can force it on.
+        self.highlight_suppressed = False
