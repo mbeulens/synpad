@@ -4,10 +4,14 @@ bolded while the cursor is inside a call.
 Lookups use the language-specific completion dicts from completion.py. The
 popover is a single Gtk.Popover reused across all tabs; it re-anchors to the
 current view on each update and hides automatically once the cursor leaves
-the call or the view loses focus."""
+the call or the view loses focus.
+
+GTK4: popovers are parented with set_parent()/unparent() rather than
+set_relative_to(), and focus-out arrives via Gtk.EventControllerFocus
+since focus-out-event no longer exists."""
 
 import gi
-gi.require_version('Gtk', '3.0')
+gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, Gdk, GLib
 
 from completion import PHP_COMPLETIONS, JS_COMPLETIONS
@@ -39,7 +43,9 @@ class SignatureHelpMixin:
         buf.connect('delete-range', lambda *_a: self._sighelp_schedule(view))
         buf.connect('notify::cursor-position',
                     lambda *_a: self._sighelp_schedule(view))
-        view.connect('focus-out-event', lambda *_a: self._sighelp_hide())
+        focus = Gtk.EventControllerFocus()
+        focus.connect('leave', lambda *_a: self._sighelp_hide())
+        view.add_controller(focus)
 
     # -- Scheduling / entry point --------------------------------------------
 
@@ -246,7 +252,7 @@ class SignatureHelpMixin:
     def _sighelp_ensure_popover(self, view):
         if self._sighelp_popover is None:
             pop = Gtk.Popover()
-            pop.set_modal(False)
+            pop.set_autohide(False)
             pop.set_position(Gtk.PositionType.BOTTOM)
             lbl = Gtk.Label()
             lbl.set_use_markup(True)
@@ -255,12 +261,14 @@ class SignatureHelpMixin:
             lbl.set_margin_end(8)
             lbl.set_margin_top(4)
             lbl.set_margin_bottom(4)
-            pop.add(lbl)
-            lbl.show()
+            pop.set_child(lbl)
             self._sighelp_popover = pop
             self._sighelp_label = lbl
-        if self._sighelp_popover.get_relative_to() is not view:
-            self._sighelp_popover.set_relative_to(view)
+        # GTK4 popovers hold exactly one parent; unparent before re-anchoring.
+        if self._sighelp_popover.get_parent() is not view:
+            if self._sighelp_popover.get_parent() is not None:
+                self._sighelp_popover.unparent()
+            self._sighelp_popover.set_parent(view)
 
     def _sighelp_position(self, view):
         buf = view.get_buffer()
