@@ -16,6 +16,8 @@ Git/GitHub project workflow that applies to every project the user works on with
 
 3. **Per-edit commits — patch bump:** Each time you modify a source file, bump the patch version (`0.1.0` → `0.1.1` → `0.1.2`), commit to `dev`, push. Patch bumps do not touch CHANGELOG.md or README.md. Memory/docs-only changes do not require a version bump.
 
+3a. **Always commit AND push after finishing a feature — never leave work committed-but-unpushed, and never wait to be asked.** Pushing is part of finishing, not a separate step needing approval. This applies to *every* branch, including new feature branches: create it, commit, and `git push -u origin <branch>` in the same breath. Do not ask "shall I push?" — just push and say that you did.
+
 4. **"Bump minor":** When the user says this, first create/update `CHANGELOG.md` and update `README.md` with the new version info, commit to `dev`, then merge `dev` → `master` (or `main` for existing repos using that name) and push both branches. Version goes `0.1.x` → `0.2.0`.
 
 5. **"Bump major":** Same sequence as bump minor — update `CHANGELOG.md` + `README.md`, commit to `dev`, merge `dev` → `master`, push both. Version goes `0.1.x` → `1.0.0`.
