@@ -95,8 +95,12 @@ kids = children(label_box)
 check("tab label has 3 children (icon, label-slot, close button)",
       len(kids) == 3, [type(k).__name__ for k in kids])
 check("first child is an image (terminal icon)", isinstance(kids[0], Gtk.Image))
-check("no Gtk.EventBox anywhere in the tab label (removed in GTK4)",
-      not any(isinstance(k, Gtk.EventBox) for k in kids) if hasattr(Gtk, 'EventBox') else True)
+# Gtk.EventBox doesn't exist under GTK4 at all (confirmed: not
+# hasattr(Gtk, 'EventBox')), so there is no class left to instance-check
+# against — the real, falsifiable guarantee is that the label lives in a
+# plain Gtk.Box slot with a GestureClick attached directly, asserted below.
+check("Gtk.EventBox class does not exist under GTK4 (removed, not just unused)",
+      not hasattr(Gtk, 'EventBox'))
 
 info = h._terminals[scroll]
 label_slot = info['label_slot']

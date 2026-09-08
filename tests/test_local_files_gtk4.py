@@ -9,7 +9,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gio
+from gi.repository import Gtk, Gio, Gdk
 
 if not Gtk.init_check():
     print("SKIP: no display"); sys.exit(0)
@@ -249,9 +249,16 @@ check("octal entry initialized to 644", octal_entry.get_text() == "644",
       octal_entry.get_text())
 
 buttons = find_all(win, Gtk.Button)
+labeled_order = [b.get_label() for b in buttons if b.get_label()]
 by_label = {b.get_label(): b for b in buttons if b.get_label()}
 check("Cancel and Apply buttons present",
       set(by_label) == {"Cancel", "Apply"}, list(by_label))
+# GTK3's pack_end(cancel) then pack_end(apply) rendered as [Apply, Cancel]
+# left-to-right (pack_end stacks toward the center, not the edge) —
+# find_all() walks children in append order, so this pins that layout
+# against a future regression that silently swaps the two buttons.
+check("button visual order is [Apply, Cancel] (matches old pack_end reversal)",
+      labeled_order == ["Apply", "Cancel"], labeled_order)
 
 # Toggling a checkbox updates the octal entry (checkbox -> octal sync).
 checks[1].set_active(False)  # clear Owner-write -> 0o644 becomes 0o444
@@ -315,6 +322,39 @@ try:
           h.errors and h.errors[-1][0] == "Invalid Permissions", h.errors)
 except Exception as e:
     check("invalid octal reports error without raising", False, repr(e))
+
+# --- Escape cancels the dialog (was Gtk.Dialog's built-in RESPONSE_DELETE_EVENT) --
+captured.clear()
+Gtk.Window = _CapturingWindow
+try:
+    h._show_local_permissions_dialog('/tmp/file.txt', 'file.txt', 0o644)
+finally:
+    Gtk.Window = _RealWindow
+win4 = captured[0]
+
+key_ctrls = [c for c in win4.observe_controllers()
+             if isinstance(c, Gtk.EventControllerKey)]
+# GtkWindow installs its own EventControllerKey (for mnemonics/
+# accelerators) in addition to ours — same "count/verify, don't assume
+# which one is yours" gotcha as GtkSourceView's own focus controller.
+check("permissions dialog has at least one key controller (ours + GTK's own)",
+      len(key_ctrls) >= 1, key_ctrls)
+
+chmod_calls.clear()
+h.status.clear()
+_orig_chmod = os.chmod
+os.chmod = lambda path, mode: chmod_calls.append((path, mode))
+try:
+    # Only one of these is ours; emitting on all is harmless (unmatched
+    # ones just return False) and doesn't require guessing which is ours.
+    for kc in key_ctrls:
+        kc.emit('key-pressed', Gdk.KEY_Escape, 0, 0)
+finally:
+    os.chmod = _orig_chmod
+check("Escape does not call chmod", chmod_calls == [], chmod_calls)
+check("Escape reports no status change", h.status == [], h.status)
+check("Escape closes the window (was RESPONSE_DELETE_EVENT)",
+      win4.get_visible() is False, win4.get_visible())
 
 print()
 if fails: print(f"{len(fails)} FAILED: {fails}"); sys.exit(1)

@@ -10,7 +10,7 @@ import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, Gdk, GLib
 
 if not Gtk.init_check():
     print("SKIP: no display"); sys.exit(0)
@@ -155,9 +155,16 @@ check("dialog defaults to 'find_bugs' when no preset requested",
       combo.get_active_id() == 'find_bugs', combo.get_active_id())
 
 buttons = find_all(win, Gtk.Button)
+labeled_order = [b.get_label() for b in buttons if b.get_label()]
 by_label = {b.get_label(): b for b in buttons if b.get_label()}
 check("Cancel and Send buttons present", set(by_label) == {"Cancel", "Send"},
       list(by_label))
+# Gtk.Dialog.add_button("Cancel") then add_button("Send") rendered as
+# [Cancel, Send] left-to-right (add_button preserves call order, unlike
+# pack_end) — find_all() walks children in append order, so this pins
+# that layout against a future regression that silently swaps the two.
+check("button visual order is [Cancel, Send] (matches old add_button order)",
+      labeled_order == ["Cancel", "Send"], labeled_order)
 check("Send is the default widget (was set_default_response(OK))",
       win.get_default_widget() is by_label["Send"])
 
@@ -234,6 +241,25 @@ sent.clear()
 by_label["Send"].emit('clicked')
 check("custom preset with prompt text uses it verbatim",
       sent and sent[0][1] == "Is this thread-safe?", sent)
+
+# --- Escape cancels the dialog (was Gtk.Dialog's built-in RESPONSE_DELETE_EVENT) --
+win = reopen()
+key_ctrls = [c for c in win.observe_controllers()
+             if isinstance(c, Gtk.EventControllerKey)]
+# GtkWindow installs its own EventControllerKey (for mnemonics/
+# accelerators) in addition to ours — same "count/verify, don't assume
+# which one is yours" gotcha as GtkSourceView's own focus controller.
+check("Ask Claude dialog has at least one key controller (ours + GTK's own)",
+      len(key_ctrls) >= 1, key_ctrls)
+
+sent.clear()
+# Only one of these is ours; emitting on all is harmless (unmatched ones
+# just return False) and doesn't require guessing which is ours.
+for kc in key_ctrls:
+    kc.emit('key-pressed', Gdk.KEY_Escape, 0, 0)
+check("Escape sends nothing", sent == [], sent)
+check("Escape closes the window (was RESPONSE_DELETE_EVENT)",
+      win.get_visible() is False, win.get_visible())
 
 del h._claude_send  # restore the real method for the pipeline test below
 

@@ -20,7 +20,7 @@ import threading
 
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, Gdk, GLib
 
 # (key, label, prompt template). 'custom' has empty prompt — uses user input.
 PRESETS = [
@@ -231,6 +231,21 @@ class ClaudeMixin:
         box.append(btn_row)
 
         win.set_default_widget(send_btn)
+
+        # Gtk.Dialog closed on Escape (dlg.run() returned
+        # RESPONSE_DELETE_EVENT, so nothing was sent); a bare Gtk.Window
+        # has no such built-in behavior, so wire it explicitly to the same
+        # cancel path the Cancel button takes.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                respond(False)
+                return True
+            return False
+
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        win.add_controller(key_ctrl)
+
         win.present()
 
     # -- Send + stream -----------------------------------------------------

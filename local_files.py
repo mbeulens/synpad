@@ -443,4 +443,18 @@ class LocalFilesMixin:
         btn_row.append(btn_cancel)
         box.append(btn_row)
 
+        # Gtk.Dialog closed on Escape (dlg.run() returned
+        # RESPONSE_DELETE_EVENT, so no chmod ran); a bare Gtk.Window has no
+        # such built-in behavior, so wire it explicitly to the same cancel
+        # path the Cancel button takes.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                on_response(False)
+                return True
+            return False
+
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        win.add_controller(key_ctrl)
+
         win.present()
