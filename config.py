@@ -1,6 +1,6 @@
 """SynPad configuration — paths, defaults, load/save helpers."""
 
-APP_VERSION = "1.21.2"
+APP_VERSION = "2.0.0-dev"
 DEBUG_MODE = False
 
 # Longest line (in characters) SynPad will syntax-highlight. GtkSourceView 3.x
