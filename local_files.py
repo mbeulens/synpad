@@ -5,8 +5,8 @@ import stat
 from pathlib import Path
 
 import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, Gdk, GLib
+gi.require_version('Gtk', '4.0')
+from gi.repository import Gtk, Gdk, Gio, GLib
 
 
 class LocalFilesMixin:
@@ -139,19 +139,47 @@ class LocalFilesMixin:
 
     # -- Local File Tree Context Menu -------------------------------------------
 
-    def _on_local_tree_right_click(self, _view, event):
-        """Show context menu on right-click in local file tree."""
-        if event.button != 3:
-            return False
+    def _local_attach_tree_controllers(self, view):
+        """Wire the local file tree's right-click context menu.
 
-        path_info = self._local_view.get_path_at_pos(int(event.x), int(event.y))
+        GTK4 has no button-press-event; right-click arrives via a
+        Gtk.GestureClick restricted to the secondary (right) button."""
+        click = Gtk.GestureClick()
+        click.set_button(3)                    # secondary only, was event.button != 3
+        click.connect('pressed', self._on_local_tree_right_click)
+        view.add_controller(click)
+
+    def _local_ensure_ctx_popover(self, view):
+        """Lazily create the context-menu popover and (re-)anchor it to
+        `view`. GTK4 popovers hold exactly one parent: unparent before
+        re-parenting."""
+        if getattr(self, '_local_ctx_popover', None) is None:
+            self._local_ctx_popover = Gtk.PopoverMenu()
+        pop = self._local_ctx_popover
+        if pop.get_parent() is not view:
+            if pop.get_parent() is not None:
+                pop.unparent()
+            pop.set_parent(view)
+        return pop
+
+    def _on_local_tree_right_click(self, gesture, n_press, x, y):
+        """Show context menu on right-click in local file tree."""
+        view = gesture.get_widget()
+        path_info = view.get_path_at_pos(int(x), int(y))
 
         if path_info:
             tree_path = path_info[0]
-            self._local_view.get_selection().select_path(tree_path)
-            self._local_view.set_cursor(tree_path, None, False)
+            view.get_selection().select_path(tree_path)
+            view.set_cursor(tree_path, None, False)
 
-        menu = Gtk.Menu()
+        menu = Gio.Menu()
+        group = Gio.SimpleActionGroup()
+
+        def add_action(section, action_name, label, callback):
+            action = Gio.SimpleAction.new(action_name, None)
+            action.connect('activate', lambda _a, _p: callback())
+            group.add_action(action)
+            section.append(label, f'localctx.{action_name}')
 
         if path_info:
             tree_path, _col, _cx, _cy = path_info
@@ -161,61 +189,60 @@ class LocalFilesMixin:
             name = self._local_store[tree_iter][0]
 
             if is_dir:
-                item = Gtk.MenuItem(label="New File...")
-                item.connect('activate', lambda _: self._on_local_new_file(local_path, tree_iter))
-                menu.append(item)
+                sec1 = Gio.Menu()
+                add_action(sec1, 'new_file', "New File...",
+                           lambda: self._on_local_new_file(local_path, tree_iter))
+                add_action(sec1, 'new_dir', "New Directory...",
+                           lambda: self._on_local_new_dir(local_path, tree_iter))
+                menu.append_section(None, sec1)
 
-                item = Gtk.MenuItem(label="New Directory...")
-                item.connect('activate', lambda _: self._on_local_new_dir(local_path, tree_iter))
-                menu.append(item)
-
-                menu.append(Gtk.SeparatorMenuItem())
-
-                item = Gtk.MenuItem(label=f"Rename '{name}'...")
-                item.connect('activate', lambda _: self._on_local_rename(local_path, name, tree_iter))
-                menu.append(item)
-
-                item = Gtk.MenuItem(label=f"Permissions '{name}'...")
-                item.connect('activate', lambda _: self._on_local_permissions(local_path, name))
-                menu.append(item)
-
-                item = Gtk.MenuItem(label=f"Delete Directory '{name}'")
-                item.connect('activate', lambda _: self._on_local_delete(local_path, name, tree_iter, is_dir=True))
-                menu.append(item)
+                sec2 = Gio.Menu()
+                add_action(sec2, 'rename', f"Rename '{name}'...",
+                           lambda: self._on_local_rename(local_path, name, tree_iter))
+                add_action(sec2, 'permissions', f"Permissions '{name}'...",
+                           lambda: self._on_local_permissions(local_path, name))
+                add_action(sec2, 'delete', f"Delete Directory '{name}'",
+                           lambda: self._on_local_delete(local_path, name, tree_iter, is_dir=True))
+                menu.append_section(None, sec2)
 
                 # Repo root: directory contains a `.git` child
                 child_dot_git = os.path.join(local_path, '.git')
                 if name == '.git' or os.path.isdir(child_dot_git):
                     target = local_path if name == '.git' else child_dot_git
-                    menu.append(Gtk.SeparatorMenuItem())
-                    item = Gtk.MenuItem(label="Show git history")
-                    item.connect('activate', lambda _, t=target: self._git_show_history_local(t))
-                    menu.append(item)
+                    sec3 = Gio.Menu()
+                    add_action(sec3, 'git_history', "Show git history",
+                               lambda: self._git_show_history_local(target))
+                    menu.append_section(None, sec3)
             else:
-                item = Gtk.MenuItem(label=f"Rename '{name}'...")
-                item.connect('activate', lambda _: self._on_local_rename(local_path, name, tree_iter))
-                menu.append(item)
-
-                item = Gtk.MenuItem(label=f"Permissions '{name}'...")
-                item.connect('activate', lambda _: self._on_local_permissions(local_path, name))
-                menu.append(item)
-
-                item = Gtk.MenuItem(label=f"Delete '{name}'")
-                item.connect('activate', lambda _: self._on_local_delete(local_path, name, tree_iter, is_dir=False))
-                menu.append(item)
+                sec = Gio.Menu()
+                add_action(sec, 'rename', f"Rename '{name}'...",
+                           lambda: self._on_local_rename(local_path, name, tree_iter))
+                add_action(sec, 'permissions', f"Permissions '{name}'...",
+                           lambda: self._on_local_permissions(local_path, name))
+                add_action(sec, 'delete', f"Delete '{name}'",
+                           lambda: self._on_local_delete(local_path, name, tree_iter, is_dir=False))
+                menu.append_section(None, sec)
         else:
             # Right-clicked on empty space
             root = self._local_path_entry.get_text().strip() or str(Path.home())
-            item = Gtk.MenuItem(label="New File...")
-            item.connect('activate', lambda _: self._on_local_new_file(root, None))
-            menu.append(item)
+            sec = Gio.Menu()
+            add_action(sec, 'new_file', "New File...",
+                       lambda: self._on_local_new_file(root, None))
+            add_action(sec, 'new_dir', "New Directory...",
+                       lambda: self._on_local_new_dir(root, None))
+            menu.append_section(None, sec)
 
-            item = Gtk.MenuItem(label="New Directory...")
-            item.connect('activate', lambda _: self._on_local_new_dir(root, None))
-            menu.append(item)
+        popover = self._local_ensure_ctx_popover(view)
+        popover.set_menu_model(menu)
+        view.insert_action_group('localctx', group)
 
-        menu.show_all()
-        menu.popup_at_pointer(event)
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+        popover.popup()
         return True
 
     def _on_local_new_file(self, parent_dir, parent_iter):
@@ -310,25 +337,29 @@ class LocalFilesMixin:
         self._show_local_permissions_dialog(local_path, name, mode)
 
     def _show_local_permissions_dialog(self, local_path, name, mode):
-        """Display permissions editing dialog for a local file."""
-        dlg = Gtk.Dialog(
+        """Display permissions editing dialog for a local file.
+
+        GTK4: this is a custom-content dialog (grid of checkboxes + an
+        octal entry), so it becomes a plain Gtk.Window with explicit
+        buttons rather than Adw.AlertDialog. `.run()`'s blocking return
+        value becomes a button-click callback; the decision logic itself
+        (validate octal, chmod, report) is unchanged."""
+        win = Gtk.Window(
             title=f"Permissions — {name}",
             transient_for=self,
             modal=True,
-            use_header_bar=False,
         )
-        dlg.set_default_size(350, -1)
+        win.set_default_size(350, -1)
 
-        box = dlg.get_content_area()
-        box.set_spacing(8)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
+        win.set_child(box)
 
-        box.pack_start(Gtk.Label(label=f"<b>{local_path}</b>",
-                                 use_markup=True, halign=Gtk.Align.START),
-                       False, False, 0)
+        box.append(Gtk.Label(label=f"<b>{local_path}</b>",
+                             use_markup=True, halign=Gtk.Align.START))
 
         grid = Gtk.Grid(column_spacing=12, row_spacing=4)
         grid.set_margin_top(8)
@@ -349,13 +380,13 @@ class LocalFilesMixin:
                 grid.attach(chk, col_i, row_i, 1, 1)
                 checks[(label, perm)] = chk
 
-        box.pack_start(grid, False, False, 0)
+        box.append(grid)
 
         octal_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        octal_row.pack_start(Gtk.Label(label="Octal:"), False, False, 0)
+        octal_row.append(Gtk.Label(label="Octal:"))
         octal_entry = Gtk.Entry(text=f"{mode:03o}", width_chars=6)
-        octal_row.pack_start(octal_entry, False, False, 0)
-        box.pack_start(octal_row, False, False, 0)
+        octal_row.append(octal_entry)
+        box.append(octal_row)
 
         def update_octal(*_args):
             val = 0
@@ -384,26 +415,32 @@ class LocalFilesMixin:
 
         octal_entry.connect('changed', update_checks)
 
+        def on_response(accepted):
+            if accepted:
+                try:
+                    new_mode = int(octal_entry.get_text().strip(), 8)
+                    os.chmod(local_path, new_mode)
+                    self._set_status(f"Permissions set: {name} → {oct(new_mode)}")
+                except ValueError:
+                    self._show_error("Invalid Permissions", "Octal value is not valid.")
+                except Exception as e:
+                    self._show_error("Permission Error", str(e))
+            win.close()
+
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_row.set_halign(Gtk.Align.END)
         btn_row.set_margin_top(8)
         btn_cancel = Gtk.Button(label="Cancel")
-        btn_cancel.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.CANCEL))
-        btn_row.pack_end(btn_cancel, False, False, 0)
+        btn_cancel.connect('clicked', lambda _b: on_response(False))
         btn_apply = Gtk.Button(label="Apply")
-        btn_apply.get_style_context().add_class('suggested-action')
-        btn_apply.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
-        btn_row.pack_end(btn_apply, False, False, 0)
-        box.pack_start(btn_row, False, False, 0)
+        btn_apply.add_css_class('suggested-action')
+        btn_apply.connect('clicked', lambda _b: on_response(True))
+        # GTK3's pack_end(cancel) then pack_end(apply) rendered as
+        # [Apply, Cancel] left-to-right (pack_end stacks toward the
+        # center); append() keeps call order, so append in that same
+        # visual order to preserve the layout exactly.
+        btn_row.append(btn_apply)
+        btn_row.append(btn_cancel)
+        box.append(btn_row)
 
-        dlg.show_all()
-        resp = dlg.run()
-        if resp == Gtk.ResponseType.OK:
-            try:
-                new_mode = int(octal_entry.get_text().strip(), 8)
-                os.chmod(local_path, new_mode)
-                self._set_status(f"Permissions set: {name} → {oct(new_mode)}")
-            except ValueError:
-                self._show_error("Invalid Permissions", "Octal value is not valid.")
-            except Exception as e:
-                self._show_error("Permission Error", str(e))
-        dlg.destroy()
+        win.present()

@@ -4,7 +4,13 @@ editor and stream the response into a tab in the Tools pane.
 Forward-compat for v2 (conversation continuity): rendering is turn-block
 based, conversation state is tracked from day one, and a single
 `_claude_send` chokepoint owns the subprocess lifecycle. v2 adds an inline
-follow-up entry that calls the same chokepoint with prior turns prepended."""
+follow-up entry that calls the same chokepoint with prior turns prepended.
+
+GTK4: the "Ask Claude" modal has substantial custom content (code preview,
+action dropdown, prompt entry), so it becomes a plain Gtk.Window with
+explicit buttons rather than Adw.AlertDialog — `.run()`'s blocking return
+value becomes a button-click callback; the decision logic that builds
+`final_prompt` is unchanged."""
 
 import datetime
 import os
@@ -13,7 +19,7 @@ import subprocess
 import threading
 
 import gi
-gi.require_version('Gtk', '3.0')
+gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GLib
 
 # (key, label, prompt template). 'custom' has empty prompt — uses user input.
@@ -79,11 +85,10 @@ class ClaudeMixin:
         """Stop button placed in the Tools header. Hidden until streaming."""
         self._claude_init()
         btn = Gtk.Button()
-        btn.set_image(Gtk.Image.new_from_icon_name(
-            'process-stop-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
-        btn.set_relief(Gtk.ReliefStyle.NONE)
+        btn.set_icon_name('process-stop-symbolic')
+        btn.add_css_class('flat')
         btn.set_tooltip_text("Stop Claude")
-        btn.set_no_show_all(True)
+        btn.set_visible(False)
         btn.connect('clicked', lambda _: self._claude_cancel())
         self._claude_stop_btn = btn
         return btn
@@ -129,20 +134,19 @@ class ClaudeMixin:
     # -- Modal -------------------------------------------------------------
 
     def _claude_show_dialog(self, code, source_label, default_preset='find_bugs'):
-        dlg = Gtk.Dialog(
+        win = Gtk.Window(
             title="Ask Claude",
             transient_for=self,
             modal=True,
-            use_header_bar=False,
         )
-        dlg.set_default_size(680, 520)
+        win.set_default_size(680, 520)
 
-        box = dlg.get_content_area()
-        box.set_spacing(8)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
+        win.set_child(box)
 
         n_chars = len(code)
         n_tokens = _estimate_tokens(code)
@@ -151,37 +155,39 @@ class ClaudeMixin:
             f"<b>{GLib.markup_escape_text(source_label)}</b>  •  "
             f"{n_chars} chars  •  ~{n_tokens} tokens")
         hdr.set_halign(Gtk.Align.START)
-        box.pack_start(hdr, False, False, 0)
+        box.append(hdr)
 
         # Code preview
         preview_scroll = Gtk.ScrolledWindow()
         preview_scroll.set_policy(Gtk.PolicyType.AUTOMATIC,
                                   Gtk.PolicyType.AUTOMATIC)
         preview_scroll.set_size_request(-1, 220)
+        preview_scroll.set_vexpand(True)
         preview_buf = Gtk.TextBuffer()
         preview_buf.set_text(code)
         preview_view = Gtk.TextView(buffer=preview_buf)
         preview_view.set_editable(False)
         preview_view.set_monospace(True)
         preview_view.set_wrap_mode(Gtk.WrapMode.NONE)
-        preview_scroll.add(preview_view)
-        box.pack_start(preview_scroll, True, True, 0)
+        preview_scroll.set_child(preview_view)
+        box.append(preview_scroll)
 
         # Action dropdown
         action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        action_row.pack_start(Gtk.Label(label="Action:"), False, False, 0)
+        action_row.append(Gtk.Label(label="Action:"))
         action_combo = Gtk.ComboBoxText()
         for key, lbl, _ in PRESETS:
             action_combo.append(key, lbl)
         action_combo.set_active_id(default_preset)
-        action_row.pack_start(action_combo, True, True, 0)
-        box.pack_start(action_row, False, False, 0)
+        action_combo.set_hexpand(True)
+        action_row.append(action_combo)
+        box.append(action_row)
 
         # Custom prompt
         prompt_lbl = Gtk.Label(
             label="Additional prompt (optional, appended to the action):")
         prompt_lbl.set_halign(Gtk.Align.START)
-        box.pack_start(prompt_lbl, False, False, 0)
+        box.append(prompt_lbl)
 
         prompt_scroll = Gtk.ScrolledWindow()
         prompt_scroll.set_policy(Gtk.PolicyType.AUTOMATIC,
@@ -190,32 +196,42 @@ class ClaudeMixin:
         prompt_buf = Gtk.TextBuffer()
         prompt_view = Gtk.TextView(buffer=prompt_buf)
         prompt_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        prompt_scroll.add(prompt_view)
-        box.pack_start(prompt_scroll, False, False, 0)
+        prompt_scroll.set_child(prompt_view)
+        box.append(prompt_scroll)
 
-        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        send_btn = dlg.add_button("Send", Gtk.ResponseType.OK)
-        send_btn.get_style_context().add_class('suggested-action')
-        dlg.set_default_response(Gtk.ResponseType.OK)
+        def respond(accepted):
+            final_prompt = None
+            preset_key = action_combo.get_active_id()
+            if accepted:
+                preset_text = PRESET_PROMPTS.get(preset_key, '')
+                extra = prompt_buf.get_text(
+                    prompt_buf.get_start_iter(),
+                    prompt_buf.get_end_iter(), False).strip()
+                if preset_key == 'custom':
+                    final_prompt = extra or 'Review this code.'
+                elif extra:
+                    final_prompt = preset_text + '\n\n' + extra
+                else:
+                    final_prompt = preset_text
+            win.close()
+            if final_prompt is not None:
+                self._claude_send(code, final_prompt, source_label, preset_key)
 
-        dlg.show_all()
-        resp = dlg.run()
-        final_prompt = None
-        preset_key = action_combo.get_active_id()
-        if resp == Gtk.ResponseType.OK:
-            preset_text = PRESET_PROMPTS.get(preset_key, '')
-            extra = prompt_buf.get_text(
-                prompt_buf.get_start_iter(),
-                prompt_buf.get_end_iter(), False).strip()
-            if preset_key == 'custom':
-                final_prompt = extra or 'Review this code.'
-            elif extra:
-                final_prompt = preset_text + '\n\n' + extra
-            else:
-                final_prompt = preset_text
-        dlg.destroy()
-        if final_prompt is not None:
-            self._claude_send(code, final_prompt, source_label, preset_key)
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_row.set_halign(Gtk.Align.END)
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect('clicked', lambda _b: respond(False))
+        send_btn = Gtk.Button(label="Send")
+        send_btn.add_css_class('suggested-action')
+        send_btn.connect('clicked', lambda _b: respond(True))
+        # Gtk.Dialog.add_button() keeps call order as visual left-to-right
+        # order, so append in the same order (Cancel, then Send) to match.
+        btn_row.append(cancel_btn)
+        btn_row.append(send_btn)
+        box.append(btn_row)
+
+        win.set_default_widget(send_btn)
+        win.present()
 
     # -- Send + stream -----------------------------------------------------
 
@@ -356,7 +372,4 @@ class ClaudeMixin:
         btn = self._claude_stop_btn
         if btn is None:
             return
-        if visible:
-            btn.show()
-        else:
-            btn.hide()
+        btn.set_visible(visible)
