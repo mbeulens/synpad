@@ -52,3 +52,21 @@ from v1.21.2.
 
 Installed: GTK 4.14.5, libadwaita 1.5, `GdkWayland-4.0`.
 Needed: `gir1.2-gtksource-5`, `gir1.2-vte-3.91`.
+
+## Gotchas found in flight
+
+Recorded as they bite, so later modules do not rediscover them.
+
+- **`Gtk.TextBuffer.get_iter_at_line()` returns `(ok, iter)` in GTK4**, not a
+  bare iter — silently breaks as `AttributeError: '_ResultTuple' object has
+  no attribute 'copy'`. Fixed in `git_history.py`; **still outstanding in
+  `editor.py` (4 sites: lines ~1558, 1572, 1602, 1629) and `window.py`
+  (1 site: line ~1082)**. Same applies to `get_iter_at_line_offset()` and
+  `get_iter_at_line_index()`.
+- **Cursors are a widget property.** `view.get_window(...)` + `win.set_cursor()`
+  becomes `widget.set_cursor_from_name(name)`; `Gdk.Cursor.new_from_name()`
+  no longer takes a display argument.
+- **`GtkSource.View` installs its own `EventControllerFocus`.** A test that
+  merely asserts one is present passes vacuously — count before and after.
+- **Popovers hold exactly one parent.** Re-anchoring needs `unparent()`
+  before `set_parent()`, or GTK warns and the popover misplaces.

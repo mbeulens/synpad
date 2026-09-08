@@ -9,7 +9,7 @@ import threading
 import webbrowser
 
 import gi
-gi.require_version('Gtk', '3.0')
+gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, Gdk, GLib
 
 GIT_LOG_FORMAT = '%h%x09%ad%x09%an%x09%s'
@@ -174,17 +174,29 @@ class GitHistoryMixin:
     # -- Click on a commit line opens it in the browser --------------------
 
     def _git_attach_click_handler(self, view):
-        """Wire click-to-browser plus hover highlight on the Git History view."""
-        view.connect('button-press-event', self._git_on_history_click)
-        view.connect('motion-notify-event', self._git_on_history_motion)
-        view.connect('leave-notify-event', self._git_on_history_leave)
+        """Wire click-to-browser plus hover highlight on the Git History view.
+
+        GTK4 has no button/motion/leave events on widgets; these arrive via
+        Gtk.GestureClick and Gtk.EventControllerMotion instead."""
+        click = Gtk.GestureClick()
+        click.set_button(1)                    # primary only, was event.button != 1
+        click.connect('pressed', self._git_on_history_click)
+        view.add_controller(click)
+
+        motion = Gtk.EventControllerMotion()
+        motion.connect('motion', self._git_on_history_motion)
+        motion.connect('leave', self._git_on_history_leave)
+        view.add_controller(motion)
 
     def _git_line_hash(self, line_no):
         """Return the commit hash on `line_no` if any, else None."""
         if line_no < 0:
             return None
         buf = self._git_history_buffer
-        line_start = buf.get_iter_at_line(line_no)
+        # GTK4: get_iter_at_line() returns (ok, iter), not a bare iter.
+        ok, line_start = buf.get_iter_at_line(line_no)
+        if not ok:
+            return None
         line_end = line_start.copy()
         if not line_end.ends_line():
             line_end.forward_to_line_end()
@@ -195,11 +207,9 @@ class GitHistoryMixin:
         return None
 
     def _git_set_text_cursor(self, view, name):
-        win = view.get_window(Gtk.TextWindowType.TEXT)
-        if win is None:
-            return
-        cursor = Gdk.Cursor.new_from_name(view.get_display(), name)
-        win.set_cursor(cursor)
+        # GTK4: cursors are a widget property; there is no GdkWindow to set
+        # it on, and Gdk.Cursor.new_from_name() no longer takes a display.
+        view.set_cursor_from_name(name)
 
     def _git_clear_hover(self):
         state = getattr(self, '_git_history_state', None) or {}
@@ -207,16 +217,17 @@ class GitHistoryMixin:
         if prev < 0:
             return
         buf = self._git_history_buffer
-        ps = buf.get_iter_at_line(prev)
+        _ok, ps = buf.get_iter_at_line(prev)
         pe = ps.copy()
         if not pe.ends_line():
             pe.forward_to_line_end()
         buf.remove_tag_by_name('git_hover', ps, pe)
         state['hover_line'] = -1
 
-    def _git_on_history_motion(self, view, event):
+    def _git_on_history_motion(self, controller, x, y):
+        view = controller.get_widget()
         x, y = view.window_to_buffer_coords(
-            Gtk.TextWindowType.WIDGET, int(event.x), int(event.y))
+            Gtk.TextWindowType.WIDGET, int(x), int(y))
         ok, it = view.get_iter_at_location(x, y)
         line_no = it.get_line() if ok else -1
         h = self._git_line_hash(line_no) if line_no >= 0 else None
@@ -231,13 +242,13 @@ class GitHistoryMixin:
         if new_line != prev_line:
             buf = self._git_history_buffer
             if prev_line >= 0:
-                ps = buf.get_iter_at_line(prev_line)
+                _ok, ps = buf.get_iter_at_line(prev_line)
                 pe = ps.copy()
                 if not pe.ends_line():
                     pe.forward_to_line_end()
                 buf.remove_tag_by_name('git_hover', ps, pe)
             if new_line >= 0:
-                ns = buf.get_iter_at_line(new_line)
+                _ok, ns = buf.get_iter_at_line(new_line)
                 ne = ns.copy()
                 if not ne.ends_line():
                     ne.forward_to_line_end()
@@ -246,16 +257,17 @@ class GitHistoryMixin:
             self._git_set_text_cursor(view, 'pointer' if h else 'text')
         return False
 
-    def _git_on_history_leave(self, view, _event):
+    def _git_on_history_leave(self, controller):
+        view = controller.get_widget()
         self._git_clear_hover()
         self._git_set_text_cursor(view, 'text')
-        return False
 
-    def _git_on_history_click(self, view, event):
-        if event.button != 1 or event.type != event.type.BUTTON_PRESS:
+    def _git_on_history_click(self, gesture, n_press, x, y):
+        if n_press != 1:
             return False
+        view = gesture.get_widget()
         x, y = view.window_to_buffer_coords(
-            Gtk.TextWindowType.WIDGET, int(event.x), int(event.y))
+            Gtk.TextWindowType.WIDGET, int(x), int(y))
         ok, it = view.get_iter_at_location(x, y)
         if not ok:
             return False
