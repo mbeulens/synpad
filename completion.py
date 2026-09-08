@@ -3,9 +3,9 @@
 import re
 
 import gi
-gi.require_version('Gtk', '3.0')
-gi.require_version('GtkSource', '3.0')
-from gi.repository import GObject, GtkSource
+gi.require_version('Gtk', '4.0')
+gi.require_version('GtkSource', '5')
+from gi.repository import GObject, GtkSource, Gio
 
 # Completions: {name: signature_or_None}
 # None = keyword (no hint), string = function signature hint
@@ -306,147 +306,132 @@ COMPLETION_LANGS = {
 }
 
 
+class SynPadProposal(GObject.Object, GtkSource.CompletionProposal):
+    """GSV5 ships no concrete proposal class, so we supply one."""
+    __gtype_name__ = 'SynPadProposal'
+
+    def __init__(self, word, sig=None):
+        super().__init__()
+        self.word = word          # text actually inserted
+        self.sig = sig or ''      # signature, shown dimmed alongside
+
+    # GSV5 uses this for its own filtering/sorting helpers.
+    def do_get_typed_text(self):
+        return self.word
+
+
 class SynPadCompletionProvider(GObject.Object, GtkSource.CompletionProvider):
-    """Provides keyword/function completion for PHP and JS/TS with signatures."""
+    """Keyword/function completion for PHP and JS/TS with signatures."""
+    __gtype_name__ = 'SynPadCompletionProvider'
+
+    MIN_PREFIX = 2
+    MAX_ITEMS = 30
+    WORD_CHARS = "_.$"
 
     def __init__(self, completions_dict):
         super().__init__()
-        self._items = []  # list of (word, proposal)
-        for name in sorted(completions_dict.keys()):
-            sig = completions_dict[name]
-            if sig:
-                label = f"{name}  {sig}"
-                info = f"{name}{sig}"
-            else:
-                label = name
-                info = name
-            # Escape markup characters in label and info
-            label_safe = label.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            info_safe = info.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            proposal = GtkSource.CompletionItem.new(label_safe, name, None, info_safe)
-            self._items.append((name, proposal))
+        self._items = [(n, completions_dict[n] or '')
+                       for n in sorted(completions_dict)]
 
-    def do_get_name(self):
+    # --- identity -----------------------------------------------------
+    def do_get_title(self):
         return "SynPad"
 
-    def do_get_priority(self):
+    def do_get_priority(self, context):
         return 1
 
-    def do_match(self, context):
-        return True
+    # --- population ---------------------------------------------------
+    def _prefix(self, context):
+        ok, start, end = context.get_bounds()
+        if not ok:
+            return "", None, None
+        return start.get_buffer().get_text(start, end, False), start, end
 
-    def do_populate(self, context):
-        # Get the word being typed
-        end_iter = context.get_iter()
-        if isinstance(end_iter, tuple):
-            _, end_iter = end_iter
-        start_iter = end_iter.copy()
+    def _matches(self, prefix):
+        p = prefix.lower()
+        out = Gio.ListStore.new(SynPadProposal)
+        if len(p) < self.MIN_PREFIX:
+            return out
+        n = 0
+        for word, sig in self._items:
+            if word.lower().startswith(p):
+                out.append(SynPadProposal(word, sig))
+                n += 1
+                if n >= self.MAX_ITEMS:
+                    break
+        return out
 
-        # Walk back to find the start of the current word (including dots for JS)
-        while start_iter.backward_char():
-            ch = start_iter.get_char()
-            if not (ch.isalnum() or ch == '_' or ch == '.' or ch == '$'):
-                start_iter.forward_char()
-                break
+    def do_populate_async(self, context, cancellable, callback, user_data=None):
+        task = Gio.Task.new(self, cancellable, callback, user_data)
+        prefix, _, _ = self._prefix(context)
+        task.return_value(self._matches(prefix))
 
-        prefix = start_iter.get_buffer().get_text(start_iter, end_iter, False).lower()
+    def do_populate_finish(self, result):
+        return result.propagate_value().value
 
-        if len(prefix) < 2:
-            context.add_proposals(self, [], True)
+    def do_refilter(self, context, model):
+        prefix, _, _ = self._prefix(context)
+        new = self._matches(prefix)
+        model.remove_all()
+        for i in range(new.get_n_items()):
+            model.append(new.get_item(i))
+
+    # --- display ------------------------------------------------------
+    def do_display(self, context, proposal, cell):
+        col = cell.get_column()
+        if col == GtkSource.CompletionColumn.TYPED_TEXT:
+            cell.set_text(proposal.word)
+        elif col == GtkSource.CompletionColumn.AFTER and proposal.sig:
+            cell.set_text(proposal.sig)
+        elif col == GtkSource.CompletionColumn.ICON:
+            cell.set_icon_name("text-x-generic-symbolic")
+
+    # --- activation ---------------------------------------------------
+    def do_activate(self, context, proposal):
+        ok, start, end = context.get_bounds()
+        if not ok:
             return
-
-        matches = [prop for word, prop in self._items
-                   if word.lower().startswith(prefix)]
-        context.add_proposals(self, matches[:30], True)
-
-    def do_get_activation(self):
-        return GtkSource.CompletionActivation.USER_REQUESTED | \
-               GtkSource.CompletionActivation.INTERACTIVE
-
-    def do_get_interactive_delay(self):
-        return 50
-
-    def do_activate_proposal(self, proposal, text_iter):
-        # Find the start of the current word
-        start = text_iter.copy()
-        while start.backward_char():
-            ch = start.get_char()
-            if not (ch.isalnum() or ch == '_' or ch == '.' or ch == '$'):
-                start.forward_char()
-                break
-
-        buf = text_iter.get_buffer()
+        buf = start.get_buffer()
         buf.begin_user_action()
-        buf.delete(start, text_iter)
-        buf.insert(start, proposal.get_text())
+        buf.delete(start, end)
+        buf.insert(start, proposal.word)
         buf.end_user_action()
-        return True
 
 
-class DocumentWordProvider(GObject.Object, GtkSource.CompletionProvider):
-    """Provides completion from words already in the document."""
+class DocumentWordProvider(SynPadCompletionProvider):
+    """Completion from words already present in the document."""
+    __gtype_name__ = 'DocumentWordProvider'
+
+    MIN_PREFIX = 3
+    MAX_ITEMS = 20
+    WORD_CHARS = "_$"
 
     def __init__(self):
-        super().__init__()
+        GObject.Object.__init__(self)
+        self._items = []
 
-    def do_get_name(self):
+    def do_get_title(self):
         return "Document"
 
-    def do_get_priority(self):
+    def do_get_priority(self, context):
         return 0
 
-    def do_match(self, context):
-        return True
-
-    def do_populate(self, context):
-        end_iter = context.get_iter()
-        if isinstance(end_iter, tuple):
-            _, end_iter = end_iter
-        start_iter = end_iter.copy()
-
-        while start_iter.backward_char():
-            ch = start_iter.get_char()
-            if not (ch.isalnum() or ch == '_' or ch == '$'):
-                start_iter.forward_char()
-                break
-
-        buf = start_iter.get_buffer()
-        prefix = buf.get_text(start_iter, end_iter, False)
-
-        if len(prefix) < 3:
-            context.add_proposals(self, [], True)
-            return
-
-        # Gather all words from the buffer
-        full_text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
-        words = set(re.findall(r'[A-Za-z_$]\w{2,}', full_text))
+    def _matches(self, prefix):
+        out = Gio.ListStore.new(SynPadProposal)
+        if len(prefix) < self.MIN_PREFIX or self._buf is None:
+            return out
+        text = self._buf.get_text(self._buf.get_start_iter(),
+                                  self._buf.get_end_iter(), False)
+        words = set(re.findall(r'[A-Za-z_$]\w{2,}', text))
         words.discard(prefix)
+        pl = prefix.lower()
+        for w in sorted(w for w in words if w.lower().startswith(pl))[:self.MAX_ITEMS]:
+            out.append(SynPadProposal(w))
+        return out
 
-        prefix_lower = prefix.lower()
-        matches = sorted(w for w in words if w.lower().startswith(prefix_lower))
+    _buf = None
 
-        proposals = [GtkSource.CompletionItem.new(w, w, None, None)
-                     for w in matches[:20]]
-        context.add_proposals(self, proposals, True)
-
-    def do_get_activation(self):
-        return GtkSource.CompletionActivation.USER_REQUESTED | \
-               GtkSource.CompletionActivation.INTERACTIVE
-
-    def do_get_interactive_delay(self):
-        return 80
-
-    def do_activate_proposal(self, proposal, text_iter):
-        start = text_iter.copy()
-        while start.backward_char():
-            ch = start.get_char()
-            if not (ch.isalnum() or ch == '_' or ch == '$'):
-                start.forward_char()
-                break
-
-        buf = text_iter.get_buffer()
-        buf.begin_user_action()
-        buf.delete(start, text_iter)
-        buf.insert(start, proposal.get_text())
-        buf.end_user_action()
-        return True
+    def do_populate_async(self, context, cancellable, callback, user_data=None):
+        ok, start, _ = context.get_bounds()
+        self._buf = start.get_buffer() if ok else None
+        super().do_populate_async(context, cancellable, callback, user_data)
