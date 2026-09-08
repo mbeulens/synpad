@@ -1,4 +1,16 @@
-"""SynPad FTP/SFTP connection managers and dialog."""
+"""SynPad FTP/SFTP connection managers and dialog.
+
+GTK4: `ConnectDialog` has real body content (server picker, a dozen entry
+fields) so per the migration plan's dialog gotcha it is a plain Gtk.Window
+with explicit buttons, not Adw.AlertDialog — it exposes an async `choose()`
+method that mirrors Adw.AlertDialog.choose()'s callback shape so callers
+don't need to special-case which kind of dialog they're driving. The
+delete-server confirmation *is* a plain heading/body/Yes-No confirm, so it
+uses Adw.AlertDialog. The SSH-key file picker used Gtk.FileChooserDialog
+(Gtk.Dialog subclass) under GTK3; GTK4 removed `Gtk.Dialog.run()` entirely,
+and FileChooserDialog is deprecated as of GTK 4.10, so this uses the native
+async replacement `Gtk.FileDialog` instead (built into GTK4, no new
+dependency)."""
 
 import ftplib
 import hashlib
@@ -10,8 +22,9 @@ from pathlib import Path
 import secrets_store
 
 import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk
+gi.require_version('Gtk', '4.0')
+gi.require_version('Adw', '1')
+from gi.repository import Gtk, Gdk, Gio, GLib, Adw
 
 try:
     import paramiko
@@ -431,8 +444,15 @@ class SFTPManager:
 
 # --- Connection Dialog -------------------------------------------------------
 
-class ConnectDialog(Gtk.Dialog):
-    """Dialog for entering FTP/SFTP connection details."""
+class ConnectDialog(Gtk.Window):
+    """Dialog for entering FTP/SFTP connection details.
+
+    GTK4: this used to be a Gtk.Dialog driven with the blocking `.run()` /
+    `.destroy()` pattern; both callers (dialogs.py and remote.py) branched
+    on the return value. It is now a plain Gtk.Window with explicit
+    Cancel/Connect buttons — see `choose()` below for the async replacement
+    API. The decision logic each caller ran after `.run()` returned is
+    unchanged; only the control flow moves into a callback."""
 
     def __init__(self, parent, config, start_new=False):
         super().__init__(
@@ -440,24 +460,22 @@ class ConnectDialog(Gtk.Dialog):
             transient_for=parent,
             modal=True,
         )
-        self.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_CONNECT, Gtk.ResponseType.OK,
-        )
         self.set_default_size(450, -1)
-        self.set_default_response(Gtk.ResponseType.OK)
         self.config = config
         self._loading_server = False  # prevent save-trigger during load
+        self._response_callback = None
+        self._response_user_data = ()
 
-        box = self.get_content_area()
-        box.set_spacing(8)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
-        box.set_margin_top(12)
-        box.set_margin_bottom(12)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer.set_margin_start(12)
+        outer.set_margin_end(12)
+        outer.set_margin_top(12)
+        outer.set_margin_bottom(12)
+        self.set_child(outer)
 
         grid = Gtk.Grid(column_spacing=10, row_spacing=8)
-        box.pack_start(grid, True, True, 0)
+        grid.set_vexpand(True)
+        outer.append(grid)
 
         row = 0
 
@@ -468,17 +486,18 @@ class ConnectDialog(Gtk.Dialog):
         self.server_combo.append('__new__', '(New connection)')
         for srv in config.get('servers', []):
             self.server_combo.append(srv['guid'], srv['name'])
-        server_box.pack_start(self.server_combo, True, True, 0)
+        self.server_combo.set_hexpand(True)
+        server_box.append(self.server_combo)
 
         self.btn_save_server = Gtk.Button(label="Save")
         self.btn_save_server.set_tooltip_text("Save current settings as a server profile")
         self.btn_save_server.connect('clicked', self._on_save_server)
-        server_box.pack_start(self.btn_save_server, False, False, 0)
+        server_box.append(self.btn_save_server)
 
         self.btn_delete_server = Gtk.Button(label="Delete")
         self.btn_delete_server.set_tooltip_text("Delete selected server profile")
         self.btn_delete_server.connect('clicked', self._on_delete_server)
-        server_box.pack_start(self.btn_delete_server, False, False, 0)
+        server_box.append(self.btn_delete_server)
 
         grid.attach(server_box, 1, row, 1, 1)
         row += 1
@@ -550,10 +569,11 @@ class ConnectDialog(Gtk.Dialog):
             text=config.get('ssh_key_path', ''),
             placeholder_text="(optional) path to private key",
         )
-        key_box.pack_start(self.key_entry, True, True, 0)
+        self.key_entry.set_hexpand(True)
+        key_box.append(self.key_entry)
         self.key_browse_btn = Gtk.Button(label="Browse...")
         self.key_browse_btn.connect('clicked', self._on_browse_key)
-        key_box.pack_start(self.key_browse_btn, False, False, 0)
+        key_box.append(self.key_browse_btn)
         grid.attach(key_box, 1, row, 1, 1)
         self.key_box_widget = key_box
         row += 1
@@ -617,7 +637,64 @@ class ConnectDialog(Gtk.Dialog):
 
         self._update_sftp_fields()
         self._update_delete_btn()
-        self.show_all()
+
+        # --- Cancel / Connect buttons (was Gtk.Dialog.add_buttons) ---
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_row.set_halign(Gtk.Align.END)
+        btn_row.set_margin_top(4)
+        btn_cancel = Gtk.Button(label="Cancel")
+        btn_cancel.connect('clicked', lambda _b: self._respond('cancel'))
+        btn_connect = Gtk.Button(label="Connect")
+        btn_connect.add_css_class('suggested-action')
+        btn_connect.connect('clicked', lambda _b: self._respond('ok'))
+        # add_buttons(CANCEL, CONNECT) preserves call order visually
+        # (verified empirically against GTK3: Cancel, then Connect,
+        # left-to-right) — append in that same order.
+        btn_row.append(btn_cancel)
+        btn_row.append(btn_connect)
+        outer.append(btn_row)
+        self.set_default_widget(btn_connect)
+
+        # Gtk.Dialog closed on Escape (dlg.run() returned
+        # RESPONSE_DELETE_EVENT, treated as not-OK by every caller); a bare
+        # Gtk.Window has no such built-in behavior, so wire it explicitly
+        # to the same cancel path the Cancel button takes.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                self._respond('cancel')
+                return True
+            return False
+
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        self.add_controller(key_ctrl)
+
+    def choose(self, callback, *user_data):
+        """Async replacement for the old `resp = dlg.run()` pattern.
+
+        Shows the dialog and returns immediately. When the user clicks
+        Connect, clicks Cancel, or presses Escape, `callback(dialog,
+        response, *user_data)` is invoked with `response` being the string
+        'ok' (Connect clicked — call `dialog.get_values()` for the entered
+        fields) or 'cancel' (Cancel clicked or Escape pressed — no values
+        should be read). The dialog is still open (and its widgets valid)
+        while the callback runs, and is closed automatically right after
+        the callback returns — callers should not call close()/destroy()
+        themselves. Mirrors Adw.AlertDialog.choose()'s callback shape so
+        call sites don't need to special-case which kind of dialog this
+        is."""
+        self._response_callback = callback
+        self._response_user_data = user_data
+        self.present()
+
+    def _respond(self, response):
+        cb = self._response_callback
+        user_data = self._response_user_data
+        self._response_callback = None
+        self._response_user_data = ()
+        if cb is not None:
+            cb(self, response, *user_data)
+        self.close()
 
     def _on_server_changed(self, combo):
         """Load fields from selected server profile."""
@@ -707,7 +784,13 @@ class ConnectDialog(Gtk.Dialog):
         self.server_combo.set_active_id(profile['guid'])
 
     def _on_delete_server(self, _btn):
-        """Delete the currently selected server profile."""
+        """Delete the currently selected server profile.
+
+        GTK4: a plain heading/body/Yes-No confirm, so this is the one
+        dialog in this module that fits Adw.AlertDialog. `.run()`'s
+        blocking `resp != Gtk.ResponseType.YES` check becomes the async
+        `_on_delete_server_response` callback below; the decision logic
+        (only delete on Yes) is unchanged."""
         server_id = self.server_combo.get_active_id()
         if server_id == '__new__' or server_id is None:
             return
@@ -715,17 +798,20 @@ class ConnectDialog(Gtk.Dialog):
         srv = find_server_by_guid(self.config, server_id)
         display_name = srv['name'] if srv else server_id
 
-        dlg = Gtk.MessageDialog(
-            transient_for=self, modal=True,
-            message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text="Delete Server",
+        dlg = Adw.AlertDialog(
+            heading="Delete Server",
+            body=f"Delete server profile '{display_name}'?",
         )
-        dlg.format_secondary_text(f"Delete server profile '{display_name}'?")
-        resp = dlg.run()
-        dlg.destroy()
+        dlg.add_response('no', "No")
+        dlg.add_response('yes', "Yes")
+        dlg.set_response_appearance('yes', Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.set_default_response('no')
+        dlg.set_close_response('no')
+        dlg.choose(self, None, self._on_delete_server_response, server_id)
 
-        if resp != Gtk.ResponseType.YES:
+    def _on_delete_server_response(self, dlg, result, server_id):
+        response = dlg.choose_finish(result)
+        if response != 'yes':
             return
 
         servers = self.config.get('servers', [])
@@ -763,23 +849,30 @@ class ConnectDialog(Gtk.Dialog):
         self.key_box_widget.set_visible(is_sftp)
 
     def _on_browse_key(self, _btn):
-        dlg = Gtk.FileChooserDialog(
-            title="Select SSH Private Key",
-            transient_for=self,
-            action=Gtk.FileChooserAction.OPEN,
-        )
-        dlg.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_OPEN, Gtk.ResponseType.OK,
-        )
+        """GTK4: Gtk.FileChooserDialog is a Gtk.Dialog subclass, and
+        Gtk.Dialog.run() no longer exists at all in GTK4 (it's also
+        deprecated since GTK 4.10 in favor of Gtk.FileDialog). Use the
+        native async Gtk.FileDialog instead — built into GTK4, no new
+        dependency. The decision logic (only set the entry when a file was
+        actually chosen) is unchanged from the old
+        `resp == Gtk.ResponseType.OK` check."""
+        dlg = Gtk.FileDialog()
+        dlg.set_title("Select SSH Private Key")
         # Start in ~/.ssh
         ssh_dir = os.path.join(str(Path.home()), '.ssh')
         if os.path.isdir(ssh_dir):
-            dlg.set_current_folder(ssh_dir)
-        resp = dlg.run()
-        if resp == Gtk.ResponseType.OK:
-            self.key_entry.set_text(dlg.get_filename())
-        dlg.destroy()
+            dlg.set_initial_folder(Gio.File.new_for_path(ssh_dir))
+        dlg.open(self, None, self._on_browse_key_response)
+
+    def _on_browse_key_response(self, dlg, result):
+        try:
+            file = dlg.open_finish(result)
+        except GLib.Error:
+            return  # cancelled, or the picker failed — leave entry as-is
+        if file is not None:
+            path = file.get_path()
+            if path:
+                self.key_entry.set_text(path)
 
     def get_values(self):
         server_id = self.server_combo.get_active_id()

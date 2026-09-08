@@ -1,10 +1,22 @@
-"""SynPad dialogs mixin — settings, color schemes, file types."""
+"""SynPad dialogs mixin — settings, color schemes, file types.
+
+GTK4: every dialog here builds real body content (a server-manager form via
+ConnectDialog, an extension list, a style-scheme list, a Dark/Light
+color-picker notebook), so per the migration plan's dialog gotcha none of
+them are Adw.AlertDialog candidates — that widget only fits a plain
+heading/body/response-button confirm. Each becomes a Gtk.Window with
+explicit buttons instead. Gtk.Dialog's built-in Escape -> close is re-added
+explicitly on every one of them, via an EventControllerKey routed to the
+same cancel path the Cancel button takes. `.run()`'s blocking return value
+becomes a button-click (or ConnectDialog.choose()) callback — the decision
+logic that used to run right after `.run()` returned is unchanged, only the
+control flow moves into that callback."""
 
 import os
 
 import gi
-gi.require_version('Gtk', '3.0')
-gi.require_version('GtkSource', '3.0')
+gi.require_version('Gtk', '4.0')
+gi.require_version('GtkSource', '5')
 from gi.repository import Gtk, GtkSource, Gdk, GLib
 
 from config import save_config, CONFIG_DIR
@@ -35,8 +47,14 @@ class DialogsMixin:
     def _on_open_settings(self, _item):
         """Open the server manager dialog."""
         dlg = ConnectDialog(self, self.config, start_new=True)
-        resp = dlg.run()
-        if resp == Gtk.ResponseType.OK:
+        dlg.choose(self._on_open_settings_response)
+
+    def _on_open_settings_response(self, dlg, response):
+        """Async continuation of the settings dialog (see ConnectDialog.choose()
+        in connection.py). The decision logic — save fields only when
+        Remember is checked, always rebuild the quick-connect menu — is
+        unchanged from the old `resp == Gtk.ResponseType.OK` check."""
+        if response == 'ok':
             vals = dlg.get_values()
             if vals.get('remember'):
                 self.config['host'] = vals['host']
@@ -51,33 +69,32 @@ class DialogsMixin:
                 save_config(self.config)
         # Always rebuild quick connect — renames/saves/deletes may have happened
         self._rebuild_quick_menu()
-        dlg.destroy()
 
     def _on_edit_file_types(self, _item):
         """Dialog to manage which file extensions open in the editor."""
-        dlg = Gtk.Dialog(
+        win = Gtk.Window(
             title="File Types — Editor Extensions",
             transient_for=self,
             modal=True,
-            use_header_bar=False,
         )
-        dlg.set_default_size(400, 450)
+        win.set_default_size(400, 450)
 
-        box = dlg.get_content_area()
-        box.set_spacing(8)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
+        win.set_child(box)
 
-        box.pack_start(Gtk.Label(
+        box.append(Gtk.Label(
             label="File extensions that open in the editor.\n"
                   "All other files open with the system default app.",
-            halign=Gtk.Align.START, wrap=True), False, False, 0)
+            halign=Gtk.Align.START, wrap=True))
 
         # Extensions list
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_vexpand(True)
 
         ext_store = Gtk.ListStore(str)
         for ext in sorted(self.config.get('editor_extensions', [])):
@@ -91,14 +108,14 @@ class DialogsMixin:
         col.add_attribute(cell, 'text', 0)
         ext_view.append_column(col)
 
-        scroll.add(ext_view)
-        box.pack_start(scroll, True, True, 0)
+        scroll.set_child(ext_view)
+        box.append(scroll)
 
         # Add/Remove row
         edit_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         ext_entry = Gtk.Entry(placeholder_text="e.g. jsx")
         ext_entry.set_hexpand(True)
-        edit_row.pack_start(ext_entry, True, True, 0)
+        edit_row.append(ext_entry)
 
         btn_add = Gtk.Button(label="Add")
         def _on_add(_btn):
@@ -112,7 +129,7 @@ class DialogsMixin:
                 ext_entry.set_text('')
         btn_add.connect('clicked', _on_add)
         ext_entry.connect('activate', _on_add)
-        edit_row.pack_start(btn_add, False, False, 0)
+        edit_row.append(btn_add)
 
         btn_remove = Gtk.Button(label="Remove")
         def _on_remove(_btn):
@@ -121,32 +138,52 @@ class DialogsMixin:
             if it:
                 model.remove(it)
         btn_remove.connect('clicked', _on_remove)
-        edit_row.pack_start(btn_remove, False, False, 0)
+        edit_row.append(btn_remove)
 
-        box.pack_start(edit_row, False, False, 0)
+        box.append(edit_row)
 
         # Buttons
+        def on_response(accepted):
+            """.run()'s blocking return value becomes this button-click
+            callback; the decision logic (save on Apply, do nothing on
+            Cancel/Escape) is unchanged."""
+            if accepted:
+                new_exts = []
+                for row in ext_store:
+                    new_exts.append(row[0])
+                self.config['editor_extensions'] = sorted(new_exts)
+                save_config(self.config)
+            win.close()
+
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        btn_cancel = Gtk.Button(label="Cancel")
-        btn_cancel.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.CANCEL))
-        btn_row.pack_end(btn_cancel, False, False, 0)
         btn_apply = Gtk.Button(label="Apply")
-        btn_apply.get_style_context().add_class('suggested-action')
-        btn_apply.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
-        btn_row.pack_end(btn_apply, False, False, 0)
-        box.pack_start(btn_row, False, False, 0)
+        btn_apply.add_css_class('suggested-action')
+        btn_apply.connect('clicked', lambda _b: on_response(True))
+        btn_cancel = Gtk.Button(label="Cancel")
+        btn_cancel.connect('clicked', lambda _b: on_response(False))
+        # GTK3's pack_end(cancel) then pack_end(apply) rendered as
+        # [Apply, Cancel] left-to-right (pack_end stacks toward the
+        # center); append() keeps call order, so append in that same
+        # visual order to preserve the layout exactly.
+        btn_row.append(btn_apply)
+        btn_row.append(btn_cancel)
+        box.append(btn_row)
 
-        dlg.show_all()
-        resp = dlg.run()
+        # Gtk.Dialog closed on Escape (dlg.run() returned
+        # RESPONSE_DELETE_EVENT, so nothing was saved); a bare Gtk.Window
+        # has no such built-in behavior, so wire it explicitly to the same
+        # cancel path the Cancel button takes.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                on_response(False)
+                return True
+            return False
 
-        if resp == Gtk.ResponseType.OK:
-            new_exts = []
-            for row in ext_store:
-                new_exts.append(row[0])
-            self.config['editor_extensions'] = sorted(new_exts)
-            save_config(self.config)
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        win.add_controller(key_ctrl)
 
-        dlg.destroy()
+        win.present()
 
     def _on_toggle_theme(self, _btn):
         dark = not self.config.get('dark_theme', True)
@@ -178,26 +215,24 @@ class DialogsMixin:
 
     def _on_pick_scheme(self, _item):
         """Dialog to pick a GtkSourceView color scheme."""
-        dlg = Gtk.Dialog(
+        win = Gtk.Window(
             title="Color Scheme",
             transient_for=self,
             modal=True,
         )
-        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                        Gtk.STOCK_OK, Gtk.ResponseType.OK)
-        dlg.set_default_size(350, 400)
-        dlg.set_default_response(Gtk.ResponseType.OK)
+        win.set_default_size(350, 400)
 
-        box = dlg.get_content_area()
-        box.set_spacing(8)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
         box.set_margin_top(12)
+        win.set_child(box)
 
-        box.add(Gtk.Label(label="Select a color scheme:", halign=Gtk.Align.START))
+        box.append(Gtk.Label(label="Select a color scheme:", halign=Gtk.Align.START))
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_vexpand(True)
 
         # ListStore: scheme_id, display_name, description
         store = Gtk.ListStore(str, str, str)
@@ -234,22 +269,57 @@ class DialogsMixin:
 
         tv.get_selection().connect('changed', on_sel_changed)
 
-        scroll.add(tv)
-        box.pack_start(scroll, True, True, 0)
-        dlg.show_all()
+        scroll.set_child(tv)
+        box.append(scroll)
 
-        resp = dlg.run()
-        if resp == Gtk.ResponseType.OK:
-            model, it = tv.get_selection().get_selected()
-            if it:
-                self.config['color_scheme'] = model[it][0]
-                self.config['custom_colors'] = {}  # reset custom when changing base
-                save_config(self.config)
+        def on_response(accepted):
+            """.run()'s blocking return value becomes this button-click
+            callback; the decision logic (apply on OK, revert the live
+            preview otherwise — Cancel or Escape) is unchanged."""
+            if accepted:
+                model, it = tv.get_selection().get_selected()
+                if it:
+                    self.config['color_scheme'] = model[it][0]
+                    self.config['custom_colors'] = {}  # reset custom when changing base
+                    save_config(self.config)
+                    self._apply_scheme_to_all()
+            else:
+                # Revert preview
                 self._apply_scheme_to_all()
-        else:
-            # Revert preview
-            self._apply_scheme_to_all()
-        dlg.destroy()
+            win.close()
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_row.set_halign(Gtk.Align.END)
+        btn_row.set_margin_top(8)
+        btn_cancel = Gtk.Button(label="Cancel")
+        btn_cancel.connect('clicked', lambda _b: on_response(False))
+        btn_ok = Gtk.Button(label="OK")
+        btn_ok.add_css_class('suggested-action')
+        btn_ok.connect('clicked', lambda _b: on_response(True))
+        # add_buttons(CANCEL, OK) preserves call order visually
+        # (Cancel, then OK) — append in that same order.
+        btn_row.append(btn_cancel)
+        btn_row.append(btn_ok)
+        box.append(btn_row)
+
+        win.set_default_widget(btn_ok)
+
+        # Gtk.Dialog closed on Escape (dlg.run() returned
+        # RESPONSE_DELETE_EVENT, treated as not-OK, so the preview was
+        # reverted); a bare Gtk.Window has no such built-in behavior, so
+        # wire it explicitly to the same cancel path the Cancel button
+        # takes.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                on_response(False)
+                return True
+            return False
+
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        win.add_controller(key_ctrl)
+
+        win.present()
 
     def _build_color_tab(self, colors):
         """Build a scrolled grid of color pickers for one theme mode.
@@ -286,8 +356,8 @@ class DialogsMixin:
             fg_chk.connect('toggled', lambda c, b: b.set_sensitive(c.get_active()), fg_btn)
             fg_btn.connect('color-set', lambda b, c: c.set_active(True), fg_chk)
             fg_box = Gtk.Box(spacing=2)
-            fg_box.pack_start(fg_chk, False, False, 0)
-            fg_box.pack_start(fg_btn, False, False, 0)
+            fg_box.append(fg_chk)
+            fg_box.append(fg_btn)
             grid.attach(fg_box, 1, row_i, 1, 1)
 
             bg_chk = Gtk.CheckButton()
@@ -303,8 +373,8 @@ class DialogsMixin:
             bg_chk.connect('toggled', lambda c, b: b.set_sensitive(c.get_active()), bg_btn)
             bg_btn.connect('color-set', lambda b, c: c.set_active(True), bg_chk)
             bg_box = Gtk.Box(spacing=2)
-            bg_box.pack_start(bg_chk, False, False, 0)
-            bg_box.pack_start(bg_btn, False, False, 0)
+            bg_box.append(bg_chk)
+            bg_box.append(bg_btn)
             grid.attach(bg_box, 2, row_i, 1, 1)
 
             bold_chk = Gtk.CheckButton()
@@ -321,7 +391,7 @@ class DialogsMixin:
                 'bold_chk': bold_chk, 'italic_chk': italic_chk,
             }
 
-        scroll.add(grid)
+        scroll.set_child(grid)
 
         def read_colors():
             result = {}
@@ -368,23 +438,22 @@ class DialogsMixin:
         dark_colors = dict(self.config.get('custom_colors_dark', {}))
         light_colors = dict(self.config.get('custom_colors_light', {}))
 
-        dlg = Gtk.Dialog(
+        win = Gtk.Window(
             title="Custom Colors",
             transient_for=self,
             modal=True,
-            use_header_bar=False,
         )
-        dlg.set_default_size(540, 620)
+        win.set_default_size(540, 620)
 
-        box = dlg.get_content_area()
-        box.set_spacing(4)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.set_margin_start(12)
         box.set_margin_end(12)
         box.set_margin_top(12)
+        win.set_child(box)
 
         # --- Load saved scheme row ---
         load_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        load_row.pack_start(Gtk.Label(label="Load scheme:", halign=Gtk.Align.START), False, False, 0)
+        load_row.append(Gtk.Label(label="Load scheme:", halign=Gtk.Align.START))
 
         scheme_combo = Gtk.ComboBoxText()
         scheme_combo.append('__none__', '(none)')
@@ -392,17 +461,22 @@ class DialogsMixin:
             scheme_combo.append(name, name)
         active = self.config.get('active_custom_scheme', '')
         scheme_combo.set_active_id(active if active else '__none__')
-        load_row.pack_start(scheme_combo, True, True, 0)
+        scheme_combo.set_hexpand(True)
+        load_row.append(scheme_combo)
 
         btn_delete_scheme = Gtk.Button(label="Delete")
         btn_delete_scheme.set_tooltip_text("Delete selected scheme")
-        load_row.pack_start(btn_delete_scheme, False, False, 0)
+        load_row.append(btn_delete_scheme)
 
-        box.pack_start(load_row, False, False, 0)
-        box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+        box.append(load_row)
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         # --- Notebook with Dark / Light tabs ---
+        # (This is a plain internal picker, not the main-window file tab
+        # strip Task 5 replaces with Adw.TabView — Gtk.Notebook is still a
+        # valid GTK4 widget and its API here is unchanged, so it stays.)
         notebook = Gtk.Notebook()
+        notebook.set_vexpand(True)
 
         dark_scroll, dark_btns, read_dark, load_dark = self._build_color_tab(dark_colors)
         notebook.append_page(dark_scroll, Gtk.Label(label="Dark Mode"))
@@ -413,7 +487,7 @@ class DialogsMixin:
         # Start on the tab matching current theme
         notebook.set_current_page(0 if self.config.get('dark_theme', True) else 1)
 
-        box.pack_start(notebook, True, True, 0)
+        box.append(notebook)
 
         # --- Save button ---
         def on_save_scheme(_btn):
@@ -473,57 +547,85 @@ class DialogsMixin:
         btn_delete_scheme.connect('clicked', on_delete_scheme)
 
         # --- Save scheme row ---
-        box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
         save_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        save_row.pack_start(Gtk.Label(label="Save as:", halign=Gtk.Align.START), False, False, 0)
+        save_row.append(Gtk.Label(label="Save as:", halign=Gtk.Align.START))
         scheme_name_entry = Gtk.Entry()
         scheme_name_entry.set_placeholder_text("Enter scheme name")
+        scheme_name_entry.set_hexpand(True)
         current_name = self.config.get('active_custom_scheme', '')
         if current_name:
             scheme_name_entry.set_text(current_name)
-        save_row.pack_start(scheme_name_entry, True, True, 0)
+        save_row.append(scheme_name_entry)
         btn_save_scheme = Gtk.Button(label="Save")
-        btn_save_scheme.get_style_context().add_class('suggested-action')
+        btn_save_scheme.add_css_class('suggested-action')
         btn_save_scheme.connect('clicked', on_save_scheme)
-        save_row.pack_start(btn_save_scheme, False, False, 0)
-        box.pack_start(save_row, False, False, 0)
+        save_row.append(btn_save_scheme)
+        box.append(save_row)
 
         # --- Bottom buttons ---
-        box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        def on_response(kind):
+            """.run()'s blocking return value becomes this button-click
+            callback; `kind` is 'apply' / 'reset' / 'cancel', matching the
+            old three-way `Gtk.ResponseType.OK` / `REJECT` / (anything
+            else) branch exactly."""
+            if kind == 'apply':
+                self.config['custom_colors_dark'] = read_dark()
+                self.config['custom_colors_light'] = read_light()
+                active = scheme_combo.get_active_id()
+                self.config['active_custom_scheme'] = active if active != '__none__' else ''
+                save_config(self.config)
+                self._apply_scheme_to_all()
+            elif kind == 'reset':
+                self.config['custom_colors_dark'] = {}
+                self.config['custom_colors_light'] = {}
+                self.config['active_custom_scheme'] = ''
+                save_config(self.config)
+                self._apply_scheme_to_all()
+            win.close()
+
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         btn_row.set_margin_bottom(8)
         btn_reset = Gtk.Button(label="Reset All")
         btn_reset.set_tooltip_text("Clear all custom colors (both modes)")
-        btn_row.pack_start(btn_reset, False, False, 0)
-        btn_cancel = Gtk.Button(label="Cancel")
-        btn_row.pack_end(btn_cancel, False, False, 0)
+        btn_reset.connect('clicked', lambda _b: on_response('reset'))
+        btn_row.append(btn_reset)
+
+        # GTK3 packed Reset at the box's start and Cancel/Apply at its end
+        # (pack_end(cancel) then pack_end(apply), reversing to [Apply,
+        # Cancel] visually) — reproduce that split with an END-aligned,
+        # hexpanding sub-box so Reset stays pinned left of Apply/Cancel.
+        right_group = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        right_group.set_hexpand(True)
+        right_group.set_halign(Gtk.Align.END)
         btn_apply = Gtk.Button(label="Apply")
-        btn_apply.get_style_context().add_class('suggested-action')
-        btn_row.pack_end(btn_apply, False, False, 0)
-        box.pack_start(btn_row, False, False, 0)
+        btn_apply.add_css_class('suggested-action')
+        btn_apply.connect('clicked', lambda _b: on_response('apply'))
+        btn_cancel = Gtk.Button(label="Cancel")
+        btn_cancel.connect('clicked', lambda _b: on_response('cancel'))
+        right_group.append(btn_apply)
+        right_group.append(btn_cancel)
+        btn_row.append(right_group)
 
-        btn_apply.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
-        btn_cancel.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.CANCEL))
-        btn_reset.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.REJECT))
+        box.append(btn_row)
 
-        dlg.show_all()
-        resp = dlg.run()
+        # Gtk.Dialog closed on Escape (dlg.run() returned
+        # RESPONSE_DELETE_EVENT, so neither Apply nor Reset ran); a bare
+        # Gtk.Window has no such built-in behavior, so wire it explicitly
+        # to the same cancel path the Cancel button takes.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                on_response('cancel')
+                return True
+            return False
 
-        if resp == Gtk.ResponseType.OK:
-            self.config['custom_colors_dark'] = read_dark()
-            self.config['custom_colors_light'] = read_light()
-            active = scheme_combo.get_active_id()
-            self.config['active_custom_scheme'] = active if active != '__none__' else ''
-            save_config(self.config)
-            self._apply_scheme_to_all()
-        elif resp == Gtk.ResponseType.REJECT:
-            self.config['custom_colors_dark'] = {}
-            self.config['custom_colors_light'] = {}
-            self.config['active_custom_scheme'] = ''
-            save_config(self.config)
-            self._apply_scheme_to_all()
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        win.add_controller(key_ctrl)
 
-        dlg.destroy()
+        win.present()
 
     def _rgba_to_hex(self, rgba):
         """Convert a Gdk.RGBA to #rrggbb hex string."""
