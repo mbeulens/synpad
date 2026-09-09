@@ -661,6 +661,22 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
             font-family: "Source Code Pro", "DejaVu Sans Mono", "Consolas", monospace;
             font-size: 11px;
         }
+        /* The completion popup measures 0 wide on this stack, so GDK refuses
+           to map it: "gdk_popup_present: assertion 'width > 0' failed", and
+           no list appears even though proposals exist (verified: the list box
+           reports real rows while every CompletionCell measures 0). Giving
+           the popup and its cells a minimum width means the surface can never
+           be presented at zero. */
+        .completion {
+            min-width: 320px;
+        }
+        .completion listview,
+        .completion row {
+            min-width: 300px;
+        }
+        .completion cell.typed-text {
+            min-width: 120px;
+        }
         """
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
