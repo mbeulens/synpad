@@ -466,6 +466,45 @@ class RemoteMixin:
         click.connect('pressed', self._on_tree_right_click)
         view.add_controller(click)
 
+        # Single-click folder toggle. Under GTK3 the TreeView's own expander
+        # arrow toggled a directory row on one click; under GTK4 that arrow
+        # does not respond here, so folders needed a double-click (the
+        # row-activated path) -- a behaviour regression reported from real use.
+        #
+        # This gesture sits at the default BUBBLE phase deliberately. GTK4's
+        # built-in expander handling is a CAPTURE-phase button-1 gesture, so
+        # if it ever does claim the press, it consumes the sequence and this
+        # handler never runs -- no double toggle. It only fires when GTK's own
+        # handling did nothing, which is exactly the broken case.
+        toggle = Gtk.GestureClick()
+        toggle.set_button(1)
+        toggle.connect('pressed', self._on_tree_single_click)
+        view.add_controller(toggle)
+
+    def _on_tree_single_click(self, gesture, n_press, x, y):
+        """Toggle a directory row on a single primary click (GTK3 parity).
+
+        Returns without acting on files, so a single click still only selects
+        them -- opening a file remains a double-click, as it was under GTK3."""
+        if n_press != 1:
+            return False
+        view = gesture.get_widget()
+        path_info = view.get_path_at_pos(int(x), int(y))
+        if not path_info:
+            return False
+        tree_path = path_info[0]
+        try:
+            tree_iter = self.tree_store.get_iter(tree_path)
+        except ValueError:
+            return False
+        if not self.tree_store[tree_iter][3]:      # not a directory
+            return False
+        if view.row_expanded(tree_path):
+            view.collapse_row(tree_path)
+        else:
+            view.expand_row(tree_path, False)
+        return False                                # let selection proceed
+
     def _remote_ensure_ctx_popover(self, view):
         """Lazily create the context-menu popover and (re-)anchor it to
         `view`. GTK4 popovers hold exactly one parent: unparent before

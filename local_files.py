@@ -149,6 +149,38 @@ class LocalFilesMixin:
         click.connect('pressed', self._on_local_tree_right_click)
         view.add_controller(click)
 
+        # Single-click folder toggle -- see remote.py's _on_tree_single_click
+        # for the full rationale. BUBBLE phase so GTK4's own CAPTURE-phase
+        # expander gesture wins if it ever claims the press.
+        toggle = Gtk.GestureClick()
+        toggle.set_button(1)
+        toggle.connect('pressed', self._on_local_tree_single_click)
+        view.add_controller(toggle)
+
+    def _on_local_tree_single_click(self, gesture, n_press, x, y):
+        """Toggle a directory row on a single primary click (GTK3 parity).
+
+        Files are untouched: a single click still only selects them, and
+        opening remains a double-click as it was under GTK3."""
+        if n_press != 1:
+            return False
+        view = gesture.get_widget()
+        path_info = view.get_path_at_pos(int(x), int(y))
+        if not path_info:
+            return False
+        tree_path = path_info[0]
+        try:
+            tree_iter = self._local_store.get_iter(tree_path)
+        except ValueError:
+            return False
+        if not self._local_store[tree_iter][3]:    # not a directory
+            return False
+        if view.row_expanded(tree_path):
+            view.collapse_row(tree_path)
+        else:
+            view.expand_row(tree_path, False)
+        return False                                # let selection proceed
+
     def _local_ensure_ctx_popover(self, view):
         """Lazily create the context-menu popover and (re-)anchor it to
         `view`. GTK4 popovers hold exactly one parent: unparent before
