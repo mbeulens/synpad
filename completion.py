@@ -306,132 +306,57 @@ COMPLETION_LANGS = {
 }
 
 
-class SynPadProposal(GObject.Object, GtkSource.CompletionProposal):
-    """GSV5 ships no concrete proposal class, so we supply one."""
-    __gtype_name__ = 'SynPadProposal'
-
-    def __init__(self, word, sig=None):
-        super().__init__()
-        self.word = word          # text actually inserted
-        self.sig = sig or ''      # signature, shown dimmed alongside
-
-    # GSV5 uses this for its own filtering/sorting helpers.
-    def do_get_typed_text(self):
-        return self.word
-
-
-class SynPadCompletionProvider(GObject.Object, GtkSource.CompletionProvider):
-    """Keyword/function completion for PHP and JS/TS with signatures."""
-    __gtype_name__ = 'SynPadCompletionProvider'
-
-    MIN_PREFIX = 2
-    MAX_ITEMS = 30
-    WORD_CHARS = "_.$"
-
-    def __init__(self, completions_dict):
-        super().__init__()
-        self._items = [(n, completions_dict[n] or '')
-                       for n in sorted(completions_dict)]
-
-    # --- identity -----------------------------------------------------
-    def do_get_title(self):
-        return "SynPad"
-
-    def do_get_priority(self, context):
-        return 1
-
-    # --- population ---------------------------------------------------
-    def _prefix(self, context):
-        ok, start, end = context.get_bounds()
-        if not ok:
-            return "", None, None
-        return start.get_buffer().get_text(start, end, False), start, end
-
-    def _matches(self, prefix):
-        p = prefix.lower()
-        out = Gio.ListStore.new(SynPadProposal)
-        if len(p) < self.MIN_PREFIX:
-            return out
-        n = 0
-        for word, sig in self._items:
-            if word.lower().startswith(p):
-                out.append(SynPadProposal(word, sig))
-                n += 1
-                if n >= self.MAX_ITEMS:
-                    break
-        return out
-
-    def do_populate_async(self, context, cancellable, callback, user_data=None):
-        task = Gio.Task.new(self, cancellable, callback, user_data)
-        prefix, _, _ = self._prefix(context)
-        task.return_value(self._matches(prefix))
-
-    def do_populate_finish(self, result):
-        return result.propagate_value().value
-
-    def do_refilter(self, context, model):
-        prefix, _, _ = self._prefix(context)
-        new = self._matches(prefix)
-        model.remove_all()
-        for i in range(new.get_n_items()):
-            model.append(new.get_item(i))
-
-    # --- display ------------------------------------------------------
-    def do_display(self, context, proposal, cell):
-        col = cell.get_column()
-        if col == GtkSource.CompletionColumn.TYPED_TEXT:
-            cell.set_text(proposal.word)
-        elif col == GtkSource.CompletionColumn.AFTER and proposal.sig:
-            cell.set_text(proposal.sig)
-        elif col == GtkSource.CompletionColumn.ICON:
-            cell.set_icon_name("text-x-generic-symbolic")
-
-    # --- activation ---------------------------------------------------
-    def do_activate(self, context, proposal):
-        ok, start, end = context.get_bounds()
-        if not ok:
-            return
-        buf = start.get_buffer()
-        buf.begin_user_action()
-        buf.delete(start, end)
-        buf.insert(start, proposal.word)
-        buf.end_user_action()
+# ---------------------------------------------------------------------------
+# Completion providers
+#
+# GtkSourceView 5's GtkSourceCompletionProvider cannot be implemented from
+# Python on this stack. Its only population entry point is the async
+# populate_async/populate_finish vfunc pair, and a provider that implements
+# them segfaults GtkSourceView on the first keystroke -- reproduced with a
+# minimal do-nothing provider, so it is not specific to our logic:
+#
+#     GLib-GIO-CRITICAL: g_task_get_source_object: assertion 'G_IS_TASK' failed
+#     Segmentation fault
+#
+# The built-in C providers are unaffected (verified: no providers, and
+# CompletionWords, and CompletionSnippets all survive typing). So word
+# completion now goes through GtkSource.CompletionWords, which accepts extra
+# buffers via register() -- we seed one with the language's keyword and
+# function names.
+#
+# What changes for the user: the completion list shows bare names rather than
+# "name  (signature)". The signatures themselves are unaffected -- they come
+# from signature_help.py's popover, which reads the same tables below.
 
 
-class DocumentWordProvider(SynPadCompletionProvider):
-    """Completion from words already present in the document."""
-    __gtype_name__ = 'DocumentWordProvider'
+def make_completion_providers(lang_dict, doc_buffer):
+    """Build the completion providers for one editor tab.
 
-    MIN_PREFIX = 3
-    MAX_ITEMS = 20
-    WORD_CHARS = "_$"
+    `lang_dict` is a COMPLETION_LANGS entry (or None for languages we have no
+    word list for); `doc_buffer` is the tab's own buffer, so words already in
+    the document are completed too.
 
-    def __init__(self):
-        GObject.Object.__init__(self)
-        self._items = []
+    Returns (providers, keep_alive). The caller must retain `keep_alive` for
+    as long as the tab lives: it holds the hidden GtkSource.Buffer seeded with
+    the language words, which CompletionWords does not own.
+    """
+    providers = []
+    keep_alive = []
 
-    def do_get_title(self):
-        return "Document"
+    if lang_dict:
+        seed = GtkSource.Buffer()
+        seed.set_text(" ".join(sorted(lang_dict.keys())))
+        lang_words = GtkSource.CompletionWords.new('SynPad')
+        lang_words.set_property('priority', 1)
+        lang_words.set_property('minimum-word-size', 2)
+        lang_words.register(seed)
+        providers.append(lang_words)
+        keep_alive.append(seed)
 
-    def do_get_priority(self, context):
-        return 0
+    doc_words = GtkSource.CompletionWords.new('Document')
+    doc_words.set_property('priority', 0)
+    doc_words.set_property('minimum-word-size', 3)
+    doc_words.register(doc_buffer)
+    providers.append(doc_words)
 
-    def _matches(self, prefix):
-        out = Gio.ListStore.new(SynPadProposal)
-        if len(prefix) < self.MIN_PREFIX or self._buf is None:
-            return out
-        text = self._buf.get_text(self._buf.get_start_iter(),
-                                  self._buf.get_end_iter(), False)
-        words = set(re.findall(r'[A-Za-z_$]\w{2,}', text))
-        words.discard(prefix)
-        pl = prefix.lower()
-        for w in sorted(w for w in words if w.lower().startswith(pl))[:self.MAX_ITEMS]:
-            out.append(SynPadProposal(w))
-        return out
-
-    _buf = None
-
-    def do_populate_async(self, context, cancellable, callback, user_data=None):
-        ok, start, _ = context.get_bounds()
-        self._buf = start.get_buffer() if ok else None
-        super().do_populate_async(context, cancellable, callback, user_data)
+    return providers, keep_alive

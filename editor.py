@@ -65,7 +65,7 @@ from config import (save_config, find_server_by_guid, CONFIG_DIR,
                     MAX_HIGHLIGHT_LINE_LEN)
 import secrets_store
 from connection import FTPManager, SFTPManager
-from completion import SynPadCompletionProvider, DocumentWordProvider, COMPLETION_LANGS
+from completion import make_completion_providers, COMPLETION_LANGS
 from symbols import SYMBOL_EXTENSIONS, parse_symbols, SYMBOL_ICONS
 from tab import OpenTab
 
@@ -222,14 +222,14 @@ class EditorMixin:
             # there is nothing left to hide, so this call is simply removed.
             completion.set_property('select-on-show', True)
 
-            if ext in COMPLETION_LANGS:
-                provider = SynPadCompletionProvider(COMPLETION_LANGS[ext])
+            providers, keep_alive = make_completion_providers(
+                COMPLETION_LANGS.get(ext), view.get_buffer())
+            for provider in providers:
                 completion.add_provider(provider)
-                view._lang_provider = provider
-
-            doc_provider = DocumentWordProvider()
-            completion.add_provider(doc_provider)
-            view._doc_provider = doc_provider
+            # CompletionWords does not own the buffers it scans, so the seeded
+            # language buffer must outlive this function or its words vanish.
+            view._completion_providers = providers
+            view._completion_keepalive = keep_alive
 
         view.connect('realize', _setup_completion)
 
