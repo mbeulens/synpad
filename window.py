@@ -493,6 +493,12 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         lbl = Gtk.Label()
         lbl.set_markup("<b>Tools</b>")
         console_header.append(lbl)
+        # The other half of the pack_end->append conversion rule (see
+        # _make_pane_wrapper's lbl.set_hexpand(True), the working
+        # precedent): without this, the label claims only its natural
+        # width and the four buttons appended after it bunch up right
+        # next to it instead of sitting flush against the right edge.
+        lbl.set_hexpand(True)
 
         btn_clear_console = Gtk.Button()
         btn_clear_console.set_icon_name('edit-clear-symbolic')
@@ -636,11 +642,11 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
             font-size: 12px;
         }
         .pane-header {
-            background-color: @headerbar_bg_color;
+            background-color: @window_bg_color;
             padding: 2px 0px;
         }
         .pane-header:hover {
-            background-color: alpha(@headerbar_fg_color, 0.08);
+            background-color: alpha(@window_fg_color, 0.08);
         }
         .console-view {
             font-family: "Source Code Pro", "DejaVu Sans Mono", "Consolas", monospace;
@@ -957,6 +963,35 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
     def _connect_signals(self):
         self.connect('close-request', self._on_close_request)
         key_ctrl = Gtk.EventControllerKey()
+        # CAPTURE, not the default BUBBLE: GTK4 dispatches BUBBLE bottom-up
+        # from the focus widget, so a target-widget binding wins before it
+        # ever reaches a toplevel-level BUBBLE handler. Concretely,
+        # GtkSourceView/GtkTextView's own built-in ShortcutController binds
+        # <Shift><Control>a to select-all(FALSE), which always returns
+        # TRUE — with this controller at BUBBLE, Ctrl+Shift+A ("Ask
+        # Claude") was silently swallowed by the view's own select-all
+        # whenever the editor had focus. The same BUBBLE ordering let
+        # Vte.Terminal's own key controller swallow F12/Ctrl+W/Ctrl+Q/
+        # Ctrl+S while a terminal had focus. CAPTURE runs this controller
+        # top-down, before any descendant widget's own key handling —
+        # exactly how GTK3's `self.connect('key-press-event', ...)` on the
+        # toplevel behaved (raw key events land on the toplevel first;
+        # only the *default* class handler, which runs after a plain
+        # connect()'d handler, forwards to the focus widget).
+        #
+        # This intentionally now also runs *before* editor.py's own
+        # CAPTURE-phase controller on the source view (added directly to
+        # the view, so it fires after this one, being the nested
+        # descendant) for the keys they both handle (Ctrl+F/R/G/N/O/S):
+        # both call the identical underlying methods, so whichever one
+        # gets there first is not an observable difference. Keys this
+        # handler does not recognize (Tab-to-expand-snippet, plain
+        # typing, Ctrl+C/D and everything else a terminal needs) fall
+        # through with `return False`, so CAPTURE continues on down to
+        # the view/terminal's own handling exactly as before — verified
+        # by tests/test_window_gtk4.py driving both a source view and a
+        # Vte.Terminal.
+        key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         key_ctrl.connect('key-pressed', self._on_key_press)
         self.add_controller(key_ctrl)
         self.btn_connect.connect('clicked', self._on_connect)

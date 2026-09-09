@@ -327,8 +327,8 @@ path_b = make_local_file('b.txt')
 
 win._open_local_file(path_a)
 check("opening a file removes the pinned Welcome tab",
-      win.notebook.get_n_pages() == 1 and not welcome_page.get_property('pinned') is True
-      or win.notebook.get_nth_page(0).get_title() != "Welcome")
+      win.notebook.get_n_pages() == 1
+      and win.notebook.get_nth_page(0).get_title() != "Welcome")
 check("self.tabs has exactly one entry after opening one file", len(win.tabs) == 1)
 page_a = win.notebook.get_selected_page()
 check("the new page is selected", page_a is not None)
@@ -511,6 +511,52 @@ check("inner paned start/end children match order[1]/order[2]",
 
 
 # =========================================================================
+# Tools-pane header buttons — right alignment (I-2 fix round 1). The four
+# console_header.pack_end(...) calls became append() in the right reversed
+# order (verified earlier by construction), but the *other* half of the
+# established pack_end -> append conversion rule — the pattern already
+# proven correct by _make_pane_wrapper's `lbl.set_hexpand(True)` for its
+# own pack_end button — was missing on this header's own label, so the
+# label claimed no extra space and the four buttons bunched up right next
+# to it instead of sitting flush against the right edge. This sandbox's
+# Wayland compositor never delivers a frame/configure cycle to an
+# off-screen surface (get_allocation() never updates past its very first
+# pass no matter how long the mainloop is pumped — verified independently
+# of this bug, on a plain Gtk.Window with no SynPad code involved), so
+# pixel positions can't be measured here the way the reviewer's
+# environment could; this checks the structural fix instead (hexpand set,
+# matching the identical already-correct pattern) plus the append order.
+# =========================================================================
+
+tools_label = None
+for _l in find_all(win._console_pane, Gtk.Label):
+    if _l.get_text() == "Tools":
+        tools_label = _l
+        break
+check("Tools-pane header label found", tools_label is not None)
+check("Tools-pane header label has hexpand (I-2: matches _make_pane_wrapper's "
+      "already-correct lbl.set_hexpand(True) pattern for a pack_end-turned-append "
+      "trailing group)", tools_label is not None and tools_label.get_hexpand() is True)
+
+console_header = tools_label.get_parent() if tools_label is not None else None
+# (icon-name order, left-to-right in the box == visual order): reversed
+# original pack_end call order (clear, add_term, stop, tools_dock) ->
+# [tools_dock, stop, add_term(optional), clear].
+ordered_icons = []
+if console_header is not None:
+    child = console_header.get_first_child()
+    while child is not None:
+        if isinstance(child, Gtk.Button):
+            ordered_icons.append(child.get_icon_name())
+        child = child.get_next_sibling()
+expected_icons = ['view-fullscreen-symbolic', 'process-stop-symbolic',
+                   'list-add-symbolic', 'edit-clear-symbolic']
+check("Tools-pane header buttons keep the reversed-pack_end append order "
+      "(tools_dock, stop, add_term, clear — clear at the true right edge)",
+      ordered_icons == expected_icons, ordered_icons)
+
+
+# =========================================================================
 # Tools pane detach / re-attach (Gtk.Paned conversion + close-request)
 # =========================================================================
 
@@ -542,27 +588,263 @@ check("closing the detached Tools window re-attaches it",
 
 
 # =========================================================================
-# Main window close-request — cancelable, unlike bare Gtk.Window's default
+# C-1 fix round 1: window's key controller must run at CAPTURE phase, not
+# the default BUBBLE. GTK4 dispatches BUBBLE bottom-up starting at the
+# focus widget, so a target-widget binding wins before a toplevel BUBBLE
+# handler ever sees the event — concretely, GtkSourceView/GtkTextView
+# bind <Shift><Control>a to select-all(FALSE) (a Gtk.ShortcutController,
+# always returns handled), and Vte.Terminal carries its own BUBBLE
+# Gtk.EventControllerKey — both previously swallowed keys window.py's
+# _on_key_press needs (Ctrl+Shift+A "Ask Claude"; F12/Ctrl+W/Ctrl+Q/
+# Ctrl+S while a terminal has focus) before they ever reached it.
+#
+# There is no public API in this GTK4 build to inject a synthetic OS-
+# level key event headlessly (Gtk.test_widget_send_key doesn't exist
+# here), so dispatch_key() below reproduces GTK4's own documented
+# propagation algorithm (CAPTURE root->target, then TARGET, then BUBBLE
+# target->root, stopping at the first controller that would consume the
+# event) against the REAL controllers already attached along the REAL
+# widget ancestor chain — not fakes, and not calling _on_key_press
+# directly. This explicitly includes Gtk.ShortcutController (a completely
+# different controller class from Gtk.EventControllerKey, with no
+# 'key-pressed' signal at all — it dispatches via Gtk.Shortcut/
+# Gtk.ShortcutTrigger matching instead), because that IS the real
+# competing widget in the bug report: GtkSourceView/GtkTextView's built-in
+# <Shift><Control>a -> select-all(FALSE) binding lives there, confirmed by
+# introspection (a Gtk.KeyvalTrigger for keyval 'a' with SHIFT|CONTROL, at
+# BUBBLE phase, on every GtkSource.View). Without accounting for it here,
+# this test could not actually distinguish CAPTURE from BUBBLE placement
+# for window's own controller — verified by deliberately reverting the
+# CAPTURE fix and confirming these checks fail (see the report).
 # =========================================================================
+
+_ACCEL_MASK = Gtk.accelerator_get_default_mod_mask()
+
+
+def _widget_consumes(widget, phase, keyval, state):
+    """True if `widget` has a controller at `phase` that would consume
+    this key: either a real Gtk.EventControllerKey (emitted for real, so
+    our own _on_key_press/_on_editor_key_press code actually runs), or a
+    Gtk.ShortcutController whose Gtk.KeyvalTrigger matches (checked
+    structurally via get_keyval()/get_modifiers(), since ShortcutController
+    has no 'key-pressed' signal to emit at all — it's a completely
+    different controller class from EventControllerKey, and this is
+    exactly the class GtkSourceView/GtkTextView's built-in <Shift>
+    <Control>a -> select-all(FALSE) binding uses, per the C-1 bug report).
+    A matched Gtk.Shortcut is treated as consuming (GtkSignalAction/
+    GtkNamedAction — what every built-in text-view binding uses —
+    unconditionally returns handled)."""
+    for c in widget.observe_controllers():
+        if c.get_propagation_phase() != phase:
+            continue
+        if isinstance(c, Gtk.EventControllerKey):
+            if c.emit('key-pressed', keyval, 0, state):
+                return True
+        elif isinstance(c, Gtk.ShortcutController):
+            for i in range(c.get_n_items()):
+                trig = c.get_item(i).get_trigger()
+                if (isinstance(trig, Gtk.KeyvalTrigger)
+                        and trig.get_keyval() == keyval
+                        and (trig.get_modifiers() & _ACCEL_MASK) == (state & _ACCEL_MASK)):
+                    return True
+    return False
+
+
+def dispatch_key(focus_widget, keyval, state=0):
+    """Simulate GTK4's real key-event propagation order (CAPTURE root->
+    target, then TARGET on the target itself, then BUBBLE target->root,
+    stopping at the first controller that would consume the event) against
+    the REAL controllers already attached along the REAL widget ancestor
+    chain — there is no public API to inject a synthetic OS-level key
+    event in this headless environment (Gtk.test_widget_send_key doesn't
+    exist in this GTK4 build)."""
+    chain = []
+    w = focus_widget
+    while w is not None:
+        chain.append(w)
+        w = w.get_parent()
+    root_to_target = list(reversed(chain))
+
+    for w in root_to_target:
+        if _widget_consumes(w, Gtk.PropagationPhase.CAPTURE, keyval, state):
+            return True
+    if _widget_consumes(focus_widget, Gtk.PropagationPhase.TARGET, keyval, state):
+        return True
+    for w in chain:
+        if _widget_consumes(w, Gtk.PropagationPhase.BUBBLE, keyval, state):
+            return True
+    return False
+
+
+window_key_ctrls = [c for c in win.observe_controllers() if isinstance(c, Gtk.EventControllerKey)]
+check("window has a key controller", len(window_key_ctrls) >= 1)
+check("window's key controller runs at CAPTURE phase (C-1 fix)",
+      any(c.get_propagation_phase() == Gtk.PropagationPhase.CAPTURE for c in window_key_ctrls),
+      [c.get_propagation_phase() for c in window_key_ctrls])
+
+win._open_local_file(make_local_file('keytest.txt'))
+page_key = win.notebook.get_selected_page()
+source_view = win.tabs[page_key].source_view
+
+claude_calls = []
+_orig_claude_trigger = win._claude_handle_trigger
+win._claude_handle_trigger = lambda *a, **kw: claude_calls.append(a)
+handled_claude = dispatch_key(source_view, Gdk.KEY_a,
+                              Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK)
+check("Ctrl+Shift+A with the editor focused reaches _claude_handle_trigger "
+      "(C-1: previously swallowed by GtkSourceView's own select-all(FALSE) "
+      "binding before this fix)",
+      handled_claude is True and len(claude_calls) == 1, (handled_claude, claude_calls))
+win._claude_handle_trigger = _orig_claude_trigger
+
+# Tab-to-expand-snippet must still work: window's handler doesn't
+# recognize bare Tab, so CAPTURE must fall through to editor.py's own
+# CAPTURE controller on the view.
+win.tabs[page_key].buffer.set_text('///')
+win.tabs[page_key].buffer.place_cursor(win.tabs[page_key].buffer.get_end_iter())
+dispatch_key(source_view, Gdk.KEY_Tab, 0)
+snippet_text = win.tabs[page_key].buffer.get_text(
+    win.tabs[page_key].buffer.get_start_iter(), win.tabs[page_key].buffer.get_end_iter(), True)
+check("Tab-to-expand-snippet still reaches editor.py's own CAPTURE "
+      "controller after the window's CAPTURE controller doesn't claim it",
+      snippet_text.startswith('//---'), snippet_text)
+
+# Plain typing must not be swallowed by window's CAPTURE handler.
+handled_plain = dispatch_key(source_view, Gdk.KEY_x, 0)
+check("a plain letter key is not consumed anywhere in our own controllers "
+      "(propagation must continue for normal typing)", handled_plain is False)
+
+# Ctrl+F still works with the editor focused (either window's or
+# editor's own CAPTURE controller answers it — functionally identical).
+handled_ctrlf = dispatch_key(source_view, Gdk.KEY_f, Gdk.ModifierType.CONTROL_MASK)
+check("Ctrl+F with the editor focused still opens search",
+      handled_ctrlf is True and win._search_window is not None)
+if win._search_window:
+    win._on_search_close()
+win._close_tab(page_key)
+
+# -- Terminal focus: F12/Ctrl+W/Ctrl+Q/Ctrl+S must still reach the app,
+# not the shell, even though Vte.Terminal carries its own BUBBLE key
+# controller (the "secondary, same root cause" half of C-1).
+#
+# Caveat, stated plainly: emitting 'key-pressed' directly on Vte.
+# Terminal's own EventControllerKey (verified independently of these
+# checks) returns False for every key tried, including these — VTE
+# forwards keys to the PTY via its own internal widget-level key handling,
+# not by that controller returning True, so this simulation technique
+# cannot by itself distinguish "CAPTURE" from "BUBBLE" placement for the
+# terminal case the way it can for the editor/Ctrl+Shift+A case above
+# (where the real competing Gtk.ShortcutController IS inspectable). What
+# *is* fully sound regardless: CAPTURE phase at the window level, if it
+# returns True, halts GTK's propagation walk before it ever reaches the
+# terminal widget at all — by construction, whatever VTE would have done
+# with the key becomes moot. The checks below confirm the fixed behavior
+# (these shortcuts do reach the app with a terminal focused); they don't
+# independently re-derive why BUBBLE placement was wrong for VTE
+# specifically, which rests on the structural CAPTURE-halts-the-walk
+# argument instead. See task-5-report.md for the full account. --
+win._terminal_init()
+win._terminal_add_new()
+term_widget = list(win._terminals.values())[-1]['term']
+
+f12_calls = []
+_orig_toggle_console = win._on_toggle_console
+win._on_toggle_console = lambda *a: f12_calls.append(True)
+handled_f12 = dispatch_key(term_widget, Gdk.KEY_F12, 0)
+check("F12 with a terminal focused still toggles the console (was "
+      "swallowed by Vte.Terminal's own BUBBLE key controller before this "
+      "fix)", handled_f12 is True and f12_calls == [True])
+win._on_toggle_console = _orig_toggle_console
+
+quit_calls = []
+_orig_on_quit = win._on_quit
+win._on_quit = lambda *a: quit_calls.append(True)
+handled_ctrlq_term = dispatch_key(term_widget, Gdk.KEY_q, Gdk.ModifierType.CONTROL_MASK)
+check("Ctrl+Q with a terminal focused still reaches _on_quit",
+      handled_ctrlq_term is True and quit_calls == [True])
+win._on_quit = _orig_on_quit
+
+win._open_local_file(make_local_file('term_ctrlw_target.txt'))
+page_term_w = win.notebook.get_selected_page()
+handled_ctrlw_term = dispatch_key(term_widget, Gdk.KEY_w, Gdk.ModifierType.CONTROL_MASK)
+check("Ctrl+W with a terminal focused still closes the active editor tab",
+      handled_ctrlw_term is True and page_term_w not in win.tabs)
+
+handled_ctrls_term = dispatch_key(term_widget, Gdk.KEY_s, Gdk.ModifierType.CONTROL_MASK)
+check("Ctrl+S with a terminal focused still reaches _on_key_press "
+      "(handled, whether or not there's anything to save)",
+      handled_ctrls_term is True)
+
+handled_ctrlc_term = dispatch_key(term_widget, Gdk.KEY_c, Gdk.ModifierType.CONTROL_MASK)
+check("Ctrl+C with a terminal focused is NOT swallowed by the window "
+      "(the shell must still get keys window.py doesn't claim)",
+      handled_ctrlc_term is False)
+
+
+# =========================================================================
+# Main window close-request — cancelable, unlike bare Gtk.Window's default
+# (I-4 fix round 1: the *return value* of 'close-request' is what actually
+# stops GTK's default handler from destroying the window out from under a
+# still-pending async confirm — untested before this round. Flipping
+# _on_close_request's trailing `return True` to `return False` left the
+# whole 15-file suite green; every check below is written so that specific
+# mutation fails it, and this was verified by actually making the
+# mutation and re-running — see the report.)
+# =========================================================================
+
+def fake_choose_response(response):
+    """Monkeypatch Adw.AlertDialog.choose so it fires synchronously with a
+    given response id, driving the real on_response callback (not just
+    dialog construction the way capture_alert alone does) — same
+    technique as test_editor_gtk4.py's helper of the same name."""
+    def fake_choose(self, parent_win, cancellable, callback):
+        self.choose_finish = lambda res: response
+        callback(self, object())
+    return fake_choose
+
+
+ctx3 = GLib.MainContext.default()
+
+
+def present_and_pump(w):
+    """A never-.present()'d Gtk.Window reports get_visible() == False from
+    construction — checking "is the window still open/gone" is vacuous
+    unless it was actually made visible first."""
+    w.present()
+    for _ in range(20):
+        ctx3.iteration(False)
+
 
 win2 = window.SynPadWindow()
 win2._save_session = lambda: session_save_calls.append(True)
 session_save_calls = []
+present_and_pump(win2)
+check("win2 is actually visible before the close-request test "
+      "(otherwise 'window is gone' below would be vacuously true)",
+      win2.get_visible() is True)
 
 # No unsaved tabs: close-request should let the window actually close on
 # the fast path (real close, not a stub call to _on_quit).
 result = win2.emit('close-request')
-ctx3 = GLib.MainContext.default()
 for _ in range(20):
     ctx3.iteration(False)
 check("close-request with no unsaved tabs quits cleanly (_save_session ran)",
       len(session_save_calls) == 1)
+check("close-request (no unsaved tabs) returns True on the outer call — "
+      "the nested self.close() re-emission inside _do_quit is what "
+      "actually proceeds to close, not this frame returning False",
+      result is True)
 check("_quit_confirmed guards against re-entrant close-request looping",
       win2._quit_confirmed is True)
+check("the window is actually gone once the fast path completes",
+      win2.get_visible() is False)
 
+# Unsaved tab, "No": confirm dialog appears, decline it, window stays
+# open and fully usable, nothing gets saved.
 win3 = window.SynPadWindow()
 win3._save_session = lambda: session3_calls.append(True)
 session3_calls = []
+present_and_pump(win3)
 win3._open_local_file(make_local_file('unsaved.txt'))
 p3 = win3.notebook.get_selected_page()
 win3.tabs[p3].buffer.set_text("dirty\n")
@@ -572,6 +854,48 @@ check("close-request with an unsaved tab shows the Unsaved Changes confirm",
       quit_dlg is not None and quit_dlg.get_heading() == "Unsaved Changes")
 check("the window has not actually closed yet", session3_calls == [])
 quit_dlg.close()
+
+_orig_choose = Adw.AlertDialog.choose
+Adw.AlertDialog.choose = fake_choose_response('no')
+try:
+    result_no = win3.emit('close-request')
+finally:
+    Adw.AlertDialog.choose = _orig_choose
+check("close-request returns True while 'No' is being processed — GTK's "
+      "default handler must not destroy the window regardless of the "
+      "dialog's answer", result_no is True)
+check("declining ('No') the unsaved-changes confirm does not save the session",
+      session3_calls == [])
+check("declining leaves the window open (not destroyed by a wrongly-False return)",
+      win3.get_visible() is True)
+check("declining does not set _quit_confirmed", win3._quit_confirmed is False)
+# "leaves the window usable" (I-4): prove it, don't just assert a flag —
+# opening another file must still work normally afterward.
+win3._open_local_file(make_local_file('after_decline.txt'))
+check("window remains fully usable after declining quit (can still open files)",
+      len(win3.tabs) == 2)
+
+# Unsaved tab, "Yes": confirm dialog appears, accept it, session is saved
+# and the window actually closes.
+win4 = window.SynPadWindow()
+win4._save_session = lambda: session4_calls.append(True)
+session4_calls = []
+present_and_pump(win4)
+win4._open_local_file(make_local_file('unsaved2.txt'))
+p4 = win4.notebook.get_selected_page()
+win4.tabs[p4].buffer.set_text("dirty\n")
+
+Adw.AlertDialog.choose = fake_choose_response('yes')
+try:
+    result_yes = win4.emit('close-request')
+finally:
+    Adw.AlertDialog.choose = _orig_choose
+check("close-request returns True on the outer call even when 'Yes' "
+      "resolves synchronously inside it", result_yes is True)
+check("confirming 'Yes' actually saves the session", session4_calls == [True])
+check("confirming 'Yes' sets _quit_confirmed", win4._quit_confirmed is True)
+check("confirming 'Yes' actually closes the window",
+      win4.get_visible() is False)
 
 
 if __name__ == '__main__':
