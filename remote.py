@@ -471,13 +471,17 @@ class RemoteMixin:
         # does not respond here, so folders needed a double-click (the
         # row-activated path) -- a behaviour regression reported from real use.
         #
-        # This gesture sits at the default BUBBLE phase deliberately. GTK4's
-        # built-in expander handling is a CAPTURE-phase button-1 gesture, so
-        # if it ever does claim the press, it consumes the sequence and this
-        # handler never runs -- no double toggle. It only fires when GTK's own
-        # handling did nothing, which is exactly the broken case.
+        # CAPTURE phase, measured rather than assumed. At BUBBLE this fired
+        # for clicks on the folder NAME but not on the expander arrow: GTK4's
+        # own CAPTURE-phase button-1 gesture claims a press on the arrow and
+        # then does nothing with it, so the sequence never reached BUBBLE.
+        # Running at CAPTURE (and prepended, so ahead of GTK's) makes the
+        # arrow and the name behave identically, as they did under GTK3.
+        # We deliberately do NOT claim the sequence -- row selection and
+        # drag still need it.
         toggle = Gtk.GestureClick()
         toggle.set_button(1)
+        toggle.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         toggle.connect('pressed', self._on_tree_single_click)
         view.add_controller(toggle)
 

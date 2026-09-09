@@ -64,11 +64,18 @@ h._remote_attach_tree_controllers(view)
 btns = [c.get_button() for c in view.observe_controllers() if isinstance(c, Gtk.GestureClick)]
 check("remote tree has a button-1 toggle gesture", 1 in btns, btns)
 check("remote tree keeps its button-3 menu gesture", 3 in btns, btns)
-phases = [c.get_propagation_phase() for c in view.observe_controllers()
-          if isinstance(c, Gtk.GestureClick) and c.get_button() == 1
-          and c is not None]
-check("toggle gesture is BUBBLE (GTK's CAPTURE expander wins if it fires)",
-      Gtk.PropagationPhase.BUBBLE in phases, phases)
+# Must be CAPTURE: at BUBBLE this fired for clicks on the folder name but
+# NOT on the expander arrow, because GTK4's own CAPTURE-phase button-1
+# gesture claims an arrow press and does nothing with it.
+ours = [c for c in view.observe_controllers()
+        if isinstance(c, Gtk.GestureClick) and c.get_button() == 1
+        and c.get_propagation_phase() == Gtk.PropagationPhase.CAPTURE]
+check("toggle gesture runs at CAPTURE so the expander arrow reaches it",
+      len(ours) >= 1, [c.get_propagation_phase() for c in view.observe_controllers()
+                       if isinstance(c, Gtk.GestureClick)])
+# It must not claim the sequence, or row selection and drag break.
+check("toggle handler returns False so selection still happens",
+      h._on_tree_single_click(FakeGesture(view), 1, 5, 5000) is False)
 
 # geometry for a real row
 win.present()

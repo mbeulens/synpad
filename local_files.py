@@ -150,10 +150,11 @@ class LocalFilesMixin:
         view.add_controller(click)
 
         # Single-click folder toggle -- see remote.py's _on_tree_single_click
-        # for the full rationale. BUBBLE phase so GTK4's own CAPTURE-phase
-        # expander gesture wins if it ever claims the press.
+        # for the full rationale. CAPTURE phase so a press on the expander
+        # arrow reaches us; GTK4's own gesture claims it and does nothing.
         toggle = Gtk.GestureClick()
         toggle.set_button(1)
+        toggle.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         toggle.connect('pressed', self._on_local_tree_single_click)
         view.add_controller(toggle)
 
