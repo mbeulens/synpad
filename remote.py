@@ -1,4 +1,34 @@
-"""SynPad remote file tree and connection mixin."""
+"""SynPad remote file tree and connection mixin.
+
+GTK4 notes:
+
+- `_on_connect` reuses `connection.ConnectDialog.choose()` exactly per the
+  Task 2 async dialog API (see `.superpowers/sdd/gtk4-migration/
+  task-2-report.md`, "Async dialog API for downstream tasks" —
+  `ConnectDialog` is driven from two call sites, this module's `_on_connect`
+  being the second) — no second dialog pattern invented here.
+- `_ask_name` and `_confirm_delete` are called *synchronously* (blocking
+  return value) not only by this module's own tree handlers but also by
+  the already-ported `local_files.py` (`_on_local_new_file`,
+  `_on_local_new_dir`, `_on_local_rename`, `_on_local_delete`), which this
+  task may not modify. GTK4 has no synchronous alert/dialog API at all
+  (`Gtk.Dialog.run()` is gone; `Adw.AlertDialog.choose()` is async-only),
+  so both methods keep their exact old synchronous signature and return
+  value by pumping a private `GLib.MainLoop` until the dialog resolves —
+  the same recursive-mainloop technique `Gtk.Dialog.run()` used internally
+  under GTK3. Every other caller (in this module) is therefore unchanged.
+- The tree right-click context menu and the quick-connect menu convert
+  `Gtk.Menu`/`Gtk.MenuItem` to `Gio.Menu` + actions, following
+  `local_files.py`'s established pattern; the quick-connect menu attaches
+  directly to `self.quick_btn` (a `Gtk.MenuButton`) via
+  `set_menu_model()`, which manages its own popover — no manual
+  `Gtk.PopoverMenu` needed there, unlike the tree's arbitrary-position
+  right-click menu.
+- `_show_permissions_dialog` has no external caller relying on a return
+  value (it's invoked via `GLib.idle_add`), so it converts straight to the
+  async button-callback pattern (Shape B), matching `local_files.py`'s
+  `_show_local_permissions_dialog`.
+"""
 
 import hashlib
 import os
@@ -6,8 +36,9 @@ import threading
 import uuid
 
 import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, Gdk, GLib
+gi.require_version('Gtk', '4.0')
+gi.require_version('Adw', '1')
+from gi.repository import Gtk, Gdk, Gio, GLib, Adw
 
 from config import save_config, find_server_by_guid
 from connection import FTPManager, SFTPManager, ConnectDialog
@@ -18,52 +49,63 @@ class RemoteMixin:
     """Mixin for SynPadWindow — remote file tree and operations."""
 
     def _rebuild_quick_menu(self):
-        """Rebuild the quick-connect menu with grouped submenus."""
+        """Rebuild the quick-connect menu with grouped submenus.
+
+        GTK4: `Gtk.MenuButton.set_popup(Gtk.Menu)` doesn't exist anymore —
+        `Gtk.MenuButton.set_menu_model(Gio.Menu)` replaces it and manages
+        its own popover internally, so (unlike the tree context menu) no
+        manual Gtk.PopoverMenu is needed here."""
         servers = self.config.get('servers', [])
         if not servers:
             self.quick_btn.set_visible(False)
             return
         self.quick_btn.set_visible(True)
 
-        menu = Gtk.Menu()
+        menu = Gio.Menu()
+        group = Gio.SimpleActionGroup()
+
+        def add_action(section, action_name, label, guid):
+            action = Gio.SimpleAction.new(action_name, None)
+            action.connect('activate', lambda _a, _p, g=guid: self._on_quick_connect(g))
+            group.add_action(action)
+            section.append(label, f'quickconn.{action_name}')
 
         # Group servers
         groups = {}  # group_name -> [srv, ...]
         ungrouped = []
         for srv in servers:
-            group = srv.get('group', '').strip()
-            if group:
-                groups.setdefault(group, []).append(srv)
+            group_name = srv.get('group', '').strip()
+            if group_name:
+                groups.setdefault(group_name, []).append(srv)
             else:
                 ungrouped.append(srv)
 
-        # Add ungrouped servers first
-        for srv in ungrouped:
-            label = f"{srv['name']} ({srv.get('protocol','sftp').upper()})"
-            item = Gtk.MenuItem(label=label)
-            guid = srv['guid']
-            item.connect('activate', lambda _i, g=guid: self._on_quick_connect(g))
-            menu.append(item)
-
-        # Add separator if both ungrouped and grouped exist
-        if ungrouped and groups:
-            menu.append(Gtk.SeparatorMenuItem())
-
-        # Add grouped servers as submenus
-        for group_name in sorted(groups.keys()):
-            group_item = Gtk.MenuItem(label=group_name)
-            submenu = Gtk.Menu()
-            for srv in groups[group_name]:
+        # Add ungrouped servers first, as their own section (GTK draws a
+        # separator between sections automatically, matching the old
+        # "separator only if both ungrouped and grouped exist" behavior:
+        # an empty/absent section renders nothing).
+        if ungrouped:
+            sec_ungrouped = Gio.Menu()
+            for i, srv in enumerate(ungrouped):
                 label = f"{srv['name']} ({srv.get('protocol','sftp').upper()})"
-                item = Gtk.MenuItem(label=label)
-                guid = srv['guid']
-                item.connect('activate', lambda _i, g=guid: self._on_quick_connect(g))
-                submenu.append(item)
-            group_item.set_submenu(submenu)
-            menu.append(group_item)
+                add_action(sec_ungrouped, f'connect_u{i}', label, srv['guid'])
+            menu.append_section(None, sec_ungrouped)
 
-        menu.show_all()
-        self.quick_btn.set_popup(menu)
+        # Add grouped servers as submenus, one shared section holding all
+        # of them (matches the old flat sequence of submenu MenuItems).
+        if groups:
+            sec_groups = Gio.Menu()
+            for group_name in sorted(groups.keys()):
+                submenu = Gio.Menu()
+                for i, srv in enumerate(groups[group_name]):
+                    label = f"{srv['name']} ({srv.get('protocol','sftp').upper()})"
+                    safe = ''.join(c if c.isalnum() else '_' for c in group_name)
+                    add_action(submenu, f'connect_g{safe}_{i}', label, srv['guid'])
+                sec_groups.append_submenu(group_name, submenu)
+            menu.append_section(None, sec_groups)
+
+        self.quick_btn.set_menu_model(menu)
+        self.quick_btn.insert_action_group('quickconn', group)
 
     def _on_quick_connect(self, server_guid):
         """Instantly connect to a saved server."""
@@ -82,15 +124,19 @@ class RemoteMixin:
             self._do_connect(vals)
 
     def _on_connect(self, _btn):
+        """GTK4: ConnectDialog.choose() replaces the old blocking
+        `dlg.run()` — see connection.py and Task 2's worked example.
+        Decision logic (save nothing on cancel, connect on ok, always
+        rebuild the quick-connect menu) is unchanged."""
         dlg = ConnectDialog(self, self.config)
-        resp = dlg.run()
-        if resp == Gtk.ResponseType.OK:
+        dlg.choose(self._on_connect_dialog_response)
+
+    def _on_connect_dialog_response(self, dlg, response):
+        if response == 'ok':
             vals = dlg.get_values()
-            dlg.destroy()
             self._rebuild_quick_menu()
             self._do_connect(vals)
         else:
-            dlg.destroy()
             self._rebuild_quick_menu()
 
     def _do_connect(self, vals):
@@ -393,22 +439,57 @@ class RemoteMixin:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_tree_right_click(self, _view, event):
-        """Show context menu on right-click in file tree."""
-        if event.button != 3:
-            return False
+    def _remote_attach_tree_controllers(self, view):
+        """Wire the remote file tree's right-click context menu.
+
+        GTK4 has no button-press-event; right-click arrives via a
+        Gtk.GestureClick restricted to the secondary (right) button — same
+        pattern as local_files.py's _local_attach_tree_controllers."""
+        click = Gtk.GestureClick()
+        click.set_button(3)                    # secondary only, was event.button != 3
+        click.connect('pressed', self._on_tree_right_click)
+        view.add_controller(click)
+
+    def _remote_ensure_ctx_popover(self, view):
+        """Lazily create the context-menu popover and (re-)anchor it to
+        `view`. GTK4 popovers hold exactly one parent: unparent before
+        re-parenting."""
+        if getattr(self, '_remote_ctx_popover', None) is None:
+            self._remote_ctx_popover = Gtk.PopoverMenu()
+        pop = self._remote_ctx_popover
+        if pop.get_parent() is not view:
+            if pop.get_parent() is not None:
+                pop.unparent()
+            pop.set_parent(view)
+        return pop
+
+    def _on_tree_right_click(self, gesture, n_press, x, y):
+        """Show context menu on right-click in file tree.
+
+        GTK4: Gtk.Menu/Gtk.MenuItem -> Gio.Menu model + Gtk.PopoverMenu,
+        actions via Gio.SimpleAction, following local_files.py's
+        established pattern for the equivalent local-tree menu. Every
+        item, label, and connect target is unchanged."""
+        view = gesture.get_widget()
         if not self.ftp_mgr or not self.ftp_mgr.connected:
             return False
 
         # Get the clicked row and select it
-        path_info = self.tree_view.get_path_at_pos(int(event.x), int(event.y))
+        path_info = view.get_path_at_pos(int(x), int(y))
 
         if path_info:
             tree_path = path_info[0]
-            self.tree_view.get_selection().select_path(tree_path)
-            self.tree_view.set_cursor(tree_path, None, False)
+            view.get_selection().select_path(tree_path)
+            view.set_cursor(tree_path, None, False)
 
-        menu = Gtk.Menu()
+        menu = Gio.Menu()
+        group = Gio.SimpleActionGroup()
+
+        def add_action(section, action_name, label, callback):
+            action = Gio.SimpleAction.new(action_name, None)
+            action.connect('activate', lambda _a, _p: callback())
+            group.add_action(action)
+            section.append(label, f'remotectx.{action_name}')
 
         if path_info:
             tree_path, _col, _cx, _cy = path_info
@@ -419,117 +500,175 @@ class RemoteMixin:
 
             if is_dir:
                 # Right-clicked on a directory
-                item = Gtk.MenuItem(label="New File...")
-                item.connect('activate', lambda _: self._on_tree_new_file(remote_path, tree_iter))
-                menu.append(item)
+                sec1 = Gio.Menu()
+                add_action(sec1, 'new_file', "New File...",
+                           lambda: self._on_tree_new_file(remote_path, tree_iter))
+                add_action(sec1, 'new_dir', "New Directory...",
+                           lambda: self._on_tree_new_dir(remote_path, tree_iter))
+                menu.append_section(None, sec1)
 
-                item = Gtk.MenuItem(label="New Directory...")
-                item.connect('activate', lambda _: self._on_tree_new_dir(remote_path, tree_iter))
-                menu.append(item)
-
-                menu.append(Gtk.SeparatorMenuItem())
-
-                item = Gtk.MenuItem(label=f"Rename '{name}'...")
-                item.connect('activate', lambda _: self._on_tree_rename(remote_path, name, tree_iter))
-                menu.append(item)
-
-                item = Gtk.MenuItem(label=f"Permissions '{name}'...")
-                item.connect('activate', lambda _: self._on_tree_permissions(remote_path, name))
-                menu.append(item)
-
-                item = Gtk.MenuItem(label=f"Delete Directory '{name}'")
-                item.connect('activate', lambda _: self._on_tree_delete_dir(remote_path, tree_iter))
-                menu.append(item)
+                sec2 = Gio.Menu()
+                add_action(sec2, 'rename', f"Rename '{name}'...",
+                           lambda: self._on_tree_rename(remote_path, name, tree_iter))
+                add_action(sec2, 'permissions', f"Permissions '{name}'...",
+                           lambda: self._on_tree_permissions(remote_path, name))
+                add_action(sec2, 'delete', f"Delete Directory '{name}'",
+                           lambda: self._on_tree_delete_dir(remote_path, tree_iter))
+                menu.append_section(None, sec2)
 
                 if name == '.git' and isinstance(self.ftp_mgr, SFTPManager):
-                    menu.append(Gtk.SeparatorMenuItem())
-                    item = Gtk.MenuItem(label="Show git history")
-                    item.connect('activate', lambda _: self._git_show_history_sftp(remote_path))
-                    menu.append(item)
+                    sec3 = Gio.Menu()
+                    add_action(sec3, 'git_history', "Show git history",
+                               lambda: self._git_show_history_sftp(remote_path))
+                    menu.append_section(None, sec3)
             else:
                 # Right-clicked on a file
-                item = Gtk.MenuItem(label=f"Rename '{name}'...")
-                item.connect('activate', lambda _: self._on_tree_rename(remote_path, name, tree_iter))
-                menu.append(item)
-
-                item = Gtk.MenuItem(label=f"Permissions '{name}'...")
-                item.connect('activate', lambda _: self._on_tree_permissions(remote_path, name))
-                menu.append(item)
-
-                item = Gtk.MenuItem(label=f"Delete '{name}'")
-                item.connect('activate', lambda _: self._on_tree_delete_file(remote_path, tree_iter))
-                menu.append(item)
+                sec = Gio.Menu()
+                add_action(sec, 'rename', f"Rename '{name}'...",
+                           lambda: self._on_tree_rename(remote_path, name, tree_iter))
+                add_action(sec, 'permissions', f"Permissions '{name}'...",
+                           lambda: self._on_tree_permissions(remote_path, name))
+                add_action(sec, 'delete', f"Delete '{name}'",
+                           lambda: self._on_tree_delete_file(remote_path, tree_iter))
+                menu.append_section(None, sec)
         else:
             # Right-clicked on empty space — use the root/home dir
             start_dir = self.config.get('home_directory', '').strip()
             if not start_dir:
                 start_dir = self.ftp_mgr.home_dir
 
-            item = Gtk.MenuItem(label="New File...")
-            item.connect('activate', lambda _: self._on_tree_new_file(start_dir, None))
-            menu.append(item)
+            sec = Gio.Menu()
+            add_action(sec, 'new_file', "New File...",
+                       lambda: self._on_tree_new_file(start_dir, None))
+            add_action(sec, 'new_dir', "New Directory...",
+                       lambda: self._on_tree_new_dir(start_dir, None))
+            menu.append_section(None, sec)
 
-            item = Gtk.MenuItem(label="New Directory...")
-            item.connect('activate', lambda _: self._on_tree_new_dir(start_dir, None))
-            menu.append(item)
+        popover = self._remote_ensure_ctx_popover(view)
+        popover.set_menu_model(menu)
+        view.insert_action_group('remotectx', group)
 
-        menu.show_all()
-        menu.popup_at_pointer(event)
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+        popover.popup()
         return True
 
     def _ask_name(self, title, prompt, default_value='', ok_label='Create'):
-        """Show a simple dialog asking for a name. Returns name or None."""
-        dlg = Gtk.Dialog(title=title, transient_for=self, modal=True,
-                         use_header_bar=False)
-        dlg.set_default_size(300, -1)
+        """Show a simple dialog asking for a name. Returns name or None.
 
-        box = dlg.get_content_area()
-        box.set_spacing(8)
+        GTK4: `Gtk.Dialog.run()` no longer exists at all, but this method
+        is called synchronously — for its blocking return value — by both
+        this module's own tree handlers and by the already-ported
+        local_files.py (which this task may not modify), so the old
+        synchronous contract must survive exactly. This rebuilds the
+        dialog as a plain Gtk.Window with explicit buttons (custom
+        content, per the migration plan's dialog shape) and recovers the
+        blocking return value by pumping a private GLib.MainLoop until a
+        button (or Escape) resolves it — the same recursive-mainloop
+        technique GTK's own Gtk.Dialog.run() used internally under GTK3.
+        Decision logic is unchanged: Cancel, Escape, or an empty entry all
+        resolve to None; a non-empty name on Create/Rename resolves to
+        that name."""
+        win = Gtk.Window(title=title, transient_for=self, modal=True)
+        win.set_default_size(300, -1)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
+        win.set_child(box)
 
-        box.pack_start(Gtk.Label(label=prompt, halign=Gtk.Align.START), False, False, 0)
+        box.append(Gtk.Label(label=prompt, halign=Gtk.Align.START))
 
         entry = Gtk.Entry(text=default_value)
         entry.set_activates_default(False)
-        entry.connect('activate', lambda _: dlg.response(Gtk.ResponseType.OK))
         if default_value:
             entry.select_region(0, -1)
-        box.pack_start(entry, False, False, 0)
+        box.append(entry)
+
+        loop = GLib.MainLoop()
+        result = {'name': None}
+
+        def finish(accepted):
+            if accepted:
+                typed = entry.get_text().strip()
+                if typed:
+                    result['name'] = typed
+            win.close()
+            loop.quit()
+
+        entry.connect('activate', lambda _e: finish(True))
 
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_row.set_halign(Gtk.Align.END)
         btn_cancel = Gtk.Button(label="Cancel")
-        btn_cancel.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.CANCEL))
-        btn_row.pack_end(btn_cancel, False, False, 0)
+        btn_cancel.connect('clicked', lambda _b: finish(False))
         btn_ok = Gtk.Button(label=ok_label)
-        btn_ok.get_style_context().add_class('suggested-action')
-        btn_ok.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
-        btn_row.pack_end(btn_ok, False, False, 0)
-        box.pack_start(btn_row, False, False, 0)
+        btn_ok.add_css_class('suggested-action')
+        btn_ok.connect('clicked', lambda _b: finish(True))
+        # GTK3's pack_end(cancel) then pack_end(ok) rendered as
+        # [ok_label, Cancel] left-to-right (pack_end stacks toward the
+        # center) — append in that same visual order.
+        btn_row.append(btn_ok)
+        btn_row.append(btn_cancel)
+        box.append(btn_row)
 
-        dlg.show_all()
-        resp = dlg.run()
-        name = entry.get_text().strip()
-        dlg.destroy()
+        # Gtk.Dialog closed on Escape (dlg.run() returned
+        # RESPONSE_DELETE_EVENT, treated as not-OK -> None); a bare
+        # Gtk.Window has no such built-in behavior, so wire it explicitly
+        # to the same cancel path the Cancel button takes.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                finish(False)
+                return True
+            return False
 
-        if resp == Gtk.ResponseType.OK and name:
-            return name
-        return None
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        win.add_controller(key_ctrl)
+
+        win.present()
+        loop.run()
+        return result['name']
 
     def _confirm_delete(self, what):
-        """Ask for confirmation before deleting. Returns True if confirmed."""
-        dlg = Gtk.MessageDialog(
-            transient_for=self, modal=True,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text="Confirm Delete",
+        """Ask for confirmation before deleting. Returns True if confirmed.
+
+        GTK4: a genuine heading/body/Yes-No confirm, so per the migration
+        plan's dialog shapes this uses Adw.AlertDialog — but this method
+        is called synchronously for its True/False return by both this
+        module's own delete handlers and by the already-ported
+        local_files.py's `_on_local_delete` (which this task may not
+        modify). Adw.AlertDialog.choose() is async-only in GTK4 (there is
+        no synchronous alternative), so the old blocking-return contract
+        is recovered the same way as _ask_name above: a private
+        GLib.MainLoop pumped until the user responds. Decision logic
+        (True only on 'Yes') is unchanged."""
+        dlg = Adw.AlertDialog(
+            heading="Confirm Delete",
+            body=f"Are you sure you want to delete:\n\n{what}\n\nThis cannot be undone.",
         )
-        dlg.format_secondary_text(f"Are you sure you want to delete:\n\n{what}\n\nThis cannot be undone.")
-        resp = dlg.run()
-        dlg.destroy()
-        return resp == Gtk.ResponseType.YES
+        dlg.add_response('no', "No")
+        dlg.add_response('yes', "Yes")
+        dlg.set_response_appearance('yes', Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.set_default_response('no')
+        dlg.set_close_response('no')
+
+        loop = GLib.MainLoop()
+        result = {'confirmed': False}
+
+        def on_response(dlg, res):
+            result['confirmed'] = (dlg.choose_finish(res) == 'yes')
+            loop.quit()
+
+        dlg.choose(self, None, on_response)
+        loop.run()
+        return result['confirmed']
 
     def _on_tree_new_file(self, parent_dir, parent_iter):
         """Create a new empty file in the given directory."""
@@ -593,28 +732,38 @@ class RemoteMixin:
         threading.Thread(target=work, daemon=True).start()
 
     def _show_permissions_dialog(self, remote_path, name, mode, owner, group):
-        """Display the permissions editing dialog."""
+        """Display the permissions editing dialog.
+
+        GTK4: this is a custom-content dialog (grid of checkboxes + an
+        octal entry), so per the migration plan's dialog shape it becomes
+        a plain Gtk.Window with explicit buttons rather than
+        Adw.AlertDialog — same structure as local_files.py's
+        `_show_local_permissions_dialog`. Unlike `_ask_name`/
+        `_confirm_delete`, nothing reads a return value from this method
+        (it's invoked via GLib.idle_add), so it converts straight to the
+        async button-callback pattern with no mainloop shim needed.
+        `.run()`'s blocking return-value branch becomes the `on_response`
+        callback below; the decision logic (validate octal, apply, report)
+        is unchanged."""
         self._set_status(f"Permissions: {name}")
 
-        dlg = Gtk.Dialog(
+        win = Gtk.Window(
             title=f"Permissions — {name}",
             transient_for=self,
             modal=True,
-            use_header_bar=False,
         )
-        dlg.set_default_size(350, -1)
+        win.set_default_size(350, -1)
 
-        box = dlg.get_content_area()
-        box.set_spacing(8)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
+        win.set_child(box)
 
         # --- Permission checkboxes ---
-        box.pack_start(Gtk.Label(label=f"<b>{remote_path}</b>",
-                                 use_markup=True, halign=Gtk.Align.START),
-                       False, False, 0)
+        box.append(Gtk.Label(label=f"<b>{remote_path}</b>",
+                             use_markup=True, halign=Gtk.Align.START))
 
         grid = Gtk.Grid(column_spacing=12, row_spacing=4)
         grid.set_margin_top(8)
@@ -637,14 +786,14 @@ class RemoteMixin:
                 grid.attach(chk, col_i, row_i, 1, 1)
                 checks[(label, perm)] = chk
 
-        box.pack_start(grid, False, False, 0)
+        box.append(grid)
 
         # --- Octal display ---
         octal_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        octal_row.pack_start(Gtk.Label(label="Octal:"), False, False, 0)
+        octal_row.append(Gtk.Label(label="Octal:"))
         octal_entry = Gtk.Entry(text=f"{mode:03o}", width_chars=6)
-        octal_row.pack_start(octal_entry, False, False, 0)
-        box.pack_start(octal_row, False, False, 0)
+        octal_row.append(octal_entry)
+        box.append(octal_row)
 
         # Sync checkboxes → octal entry
         def update_octal(*_args):
@@ -677,33 +826,51 @@ class RemoteMixin:
         octal_entry.connect('changed', update_checks)
 
         # --- Buttons ---
+        def on_response(accepted):
+            if accepted:
+                try:
+                    new_mode = int(octal_entry.get_text().strip(), 8)
+                except ValueError:
+                    self._show_error("Invalid Permissions",
+                                     "Octal value is not valid.")
+                    win.close()
+                    return
+                self._apply_permissions(remote_path, name, new_mode)
+            win.close()
+
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         btn_row.set_margin_top(8)
+        btn_row.set_halign(Gtk.Align.END)
 
         btn_cancel = Gtk.Button(label="Cancel")
-        btn_cancel.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.CANCEL))
-        btn_row.pack_end(btn_cancel, False, False, 0)
+        btn_cancel.connect('clicked', lambda _b: on_response(False))
 
         btn_apply = Gtk.Button(label="Apply")
-        btn_apply.get_style_context().add_class('suggested-action')
-        btn_apply.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
-        btn_row.pack_end(btn_apply, False, False, 0)
+        btn_apply.add_css_class('suggested-action')
+        btn_apply.connect('clicked', lambda _b: on_response(True))
 
-        box.pack_start(btn_row, False, False, 0)
-        dlg.show_all()
+        # GTK3's pack_end(cancel) then pack_end(apply) rendered as
+        # [Apply, Cancel] left-to-right (pack_end stacks toward the
+        # center) — append in that same visual order.
+        btn_row.append(btn_apply)
+        btn_row.append(btn_cancel)
+        box.append(btn_row)
 
-        resp = dlg.run()
-        if resp == Gtk.ResponseType.OK:
-            try:
-                new_mode = int(octal_entry.get_text().strip(), 8)
-            except ValueError:
-                self._show_error("Invalid Permissions",
-                                 "Octal value is not valid.")
-                dlg.destroy()
-                return
+        # Gtk.Dialog closed on Escape (dlg.run() returned
+        # RESPONSE_DELETE_EVENT, so no chmod ran); a bare Gtk.Window has no
+        # such built-in behavior, so wire it explicitly to the same cancel
+        # path the Cancel button takes.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                on_response(False)
+                return True
+            return False
 
-            self._apply_permissions(remote_path, name, new_mode)
-        dlg.destroy()
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        win.add_controller(key_ctrl)
+
+        win.present()
 
     def _apply_permissions(self, remote_path, name, new_mode):
         """Apply chmod in a background thread."""

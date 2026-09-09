@@ -6,10 +6,33 @@ import os
 import threading
 
 import gi
-gi.require_version('Gtk', '3.0')
+gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, Gdk, GLib
 
 from config import find_server_by_guid
+
+# One CSS provider (shared, lazily registered) supplies the minimap's
+# per-line color classes. GTK4 removed Gtk.Widget.override_background_color()
+# entirely, so the old per-EventBox RGBA override becomes a CSS class per
+# diff tag instead.
+_MINIMAP_CSS = b"""
+.synpad-diff-replace { background-color: #edd400; }
+.synpad-diff-delete { background-color: #ef2929; }
+.synpad-diff-insert { background-color: #73d216; }
+"""
+_minimap_css_installed = [False]
+
+
+def _ensure_minimap_css():
+    if _minimap_css_installed[0]:
+        return
+    provider = Gtk.CssProvider()
+    provider.load_from_data(_MINIMAP_CSS)
+    Gtk.StyleContext.add_provider_for_display(
+        Gdk.Display.get_default(), provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+    )
+    _minimap_css_installed[0] = True
 
 
 class CompareMixin:
@@ -21,24 +44,26 @@ class CompareMixin:
             self._show_error("Compare", "Need at least 2 open tabs to compare.")
             return
 
-        # Pick two tabs dialog
-        dlg = Gtk.Dialog(
-            title="Compare Tabs",
-            transient_for=self,
-            modal=True,
-            use_header_bar=False,
-        )
-        dlg.set_default_size(350, -1)
+        # Pick two tabs dialog.
+        # GTK4: this used to be a Gtk.Dialog driven synchronously with
+        # `.run()`; Gtk.Dialog.run() no longer exists in GTK4, so this is a
+        # plain Gtk.Window with explicit Cancel/Compare buttons (custom
+        # content — two combo boxes — per the migration plan's dialog
+        # shape). No caller depends on a return value, so this converts
+        # straight to the async button-callback pattern. Decision logic
+        # (validate the two picks, then open the diff) is unchanged.
+        win = Gtk.Window(title="Compare Tabs", transient_for=self, modal=True)
+        win.set_default_size(350, -1)
 
-        box = dlg.get_content_area()
-        box.set_spacing(8)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
+        win.set_child(box)
 
-        box.pack_start(Gtk.Label(label="Select two tabs to compare:",
-                                 halign=Gtk.Align.START), False, False, 0)
+        box.append(Gtk.Label(label="Select two tabs to compare:",
+                              halign=Gtk.Align.START))
 
         grid = Gtk.Grid(column_spacing=8, row_spacing=6)
         grid.attach(Gtk.Label(label="Left:", halign=Gtk.Align.END), 0, 0, 1, 1)
@@ -66,36 +91,55 @@ class CompareMixin:
         current = self.notebook.get_current_page()
         combo_a.set_active_id(str(current))
 
-        box.pack_start(grid, False, False, 0)
+        box.append(grid)
+
+        def on_response(accepted):
+            if accepted:
+                id_a = combo_a.get_active_id()
+                id_b = combo_b.get_active_id()
+                win.close()
+                if id_a is None or id_b is None:
+                    return
+                if id_a == id_b:
+                    self._show_error("Compare", "Please select two different tabs.")
+                    return
+                tab_a = self.tabs.get(int(id_a))
+                tab_b = self.tabs.get(int(id_b))
+                if tab_a and tab_b:
+                    self._show_diff(tab_a, tab_b)
+            else:
+                win.close()
 
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_row.set_halign(Gtk.Align.END)
         btn_cancel = Gtk.Button(label="Cancel")
-        btn_cancel.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.CANCEL))
-        btn_row.pack_end(btn_cancel, False, False, 0)
+        btn_cancel.connect('clicked', lambda _b: on_response(False))
         btn_compare = Gtk.Button(label="Compare")
-        btn_compare.get_style_context().add_class('suggested-action')
-        btn_compare.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
-        btn_row.pack_end(btn_compare, False, False, 0)
-        box.pack_start(btn_row, False, False, 0)
+        btn_compare.add_css_class('suggested-action')
+        btn_compare.connect('clicked', lambda _b: on_response(True))
+        # GTK3's pack_end(cancel) then pack_end(compare) rendered as
+        # [Compare, Cancel] left-to-right (pack_end stacks toward the
+        # center, pushing the earlier child to the edge) — append() keeps
+        # call order, so append in that same visual order.
+        btn_row.append(btn_compare)
+        btn_row.append(btn_cancel)
+        box.append(btn_row)
 
-        dlg.show_all()
-        resp = dlg.run()
+        # Gtk.Dialog closed on Escape (dlg.run() returned
+        # RESPONSE_DELETE_EVENT, treated as not-OK); a bare Gtk.Window has
+        # no such built-in behavior, so wire it explicitly to the same
+        # cancel path the Cancel button takes.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                on_response(False)
+                return True
+            return False
 
-        if resp == Gtk.ResponseType.OK:
-            id_a = combo_a.get_active_id()
-            id_b = combo_b.get_active_id()
-            dlg.destroy()
-            if id_a is None or id_b is None:
-                return
-            if id_a == id_b:
-                self._show_error("Compare", "Please select two different tabs.")
-                return
-            tab_a = self.tabs.get(int(id_a))
-            tab_b = self.tabs.get(int(id_b))
-            if tab_a and tab_b:
-                self._show_diff(tab_a, tab_b)
-        else:
-            dlg.destroy()
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        win.add_controller(key_ctrl)
+
+        win.present()
 
     def _show_diff(self, tab_a, tab_b):
         """Show a side-by-side diff window comparing two tabs."""
@@ -157,6 +201,9 @@ class CompareMixin:
         total_lines = len(diff_rows)
 
         # --- Build window ---
+        # GTK3 already used a plain Gtk.Window here (not Gtk.Dialog), so
+        # there was never any built-in Escape-to-close behavior to
+        # preserve or re-add — this stays a non-modal viewer window.
         win = Gtk.Window(
             title=f"Diff: {name_a} vs {name_b}",
             transient_for=self,
@@ -181,25 +228,24 @@ class CompareMixin:
         nav_bar.set_margin_bottom(4)
 
         btn_prev_change = Gtk.Button()
-        btn_prev_change.set_image(Gtk.Image.new_from_icon_name(
-            'go-up-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
-        btn_prev_change.set_relief(Gtk.ReliefStyle.NONE)
+        btn_prev_change.set_icon_name('go-up-symbolic')
+        btn_prev_change.add_css_class('flat')
         btn_prev_change.set_tooltip_text("Previous change")
-        nav_bar.pack_start(btn_prev_change, False, False, 0)
+        nav_bar.append(btn_prev_change)
 
         btn_next_change = Gtk.Button()
-        btn_next_change.set_image(Gtk.Image.new_from_icon_name(
-            'go-down-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
-        btn_next_change.set_relief(Gtk.ReliefStyle.NONE)
+        btn_next_change.set_icon_name('go-down-symbolic')
+        btn_next_change.add_css_class('flat')
         btn_next_change.set_tooltip_text("Next change")
-        nav_bar.pack_start(btn_next_change, False, False, 0)
+        nav_bar.append(btn_next_change)
 
         change_label = Gtk.Label()
         if change_blocks:
             change_label.set_text(f"Change 1 of {len(change_blocks)}")
         else:
             change_label.set_text("No changes")
-        nav_bar.pack_start(change_label, False, False, 8)
+        change_label.set_margin_start(8)
+        nav_bar.append(change_label)
 
         # Left + Right panes in a horizontal box with synced scrolling
         content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -212,10 +258,11 @@ class CompareMixin:
         left_header.set_margin_top(4)
         left_header.set_margin_bottom(4)
         left_header.set_halign(Gtk.Align.START)
-        left_box.pack_start(left_header, False, False, 0)
+        left_box.append(left_header)
 
         left_scroll = Gtk.ScrolledWindow()
         left_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        left_scroll.set_vexpand(True)
 
         left_buf = Gtk.TextBuffer()
         left_buf.create_tag('replace', background='#edd400', foreground='#000000')
@@ -227,8 +274,8 @@ class CompareMixin:
         left_view.set_editable(False)
         left_view.set_cursor_visible(False)
         left_view.set_monospace(True)
-        left_scroll.add(left_view)
-        left_box.pack_start(left_scroll, True, True, 0)
+        left_scroll.set_child(left_view)
+        left_box.append(left_scroll)
 
         # --- Right pane ---
         right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -238,10 +285,11 @@ class CompareMixin:
         right_header.set_margin_top(4)
         right_header.set_margin_bottom(4)
         right_header.set_halign(Gtk.Align.START)
-        right_box.pack_start(right_header, False, False, 0)
+        right_box.append(right_header)
 
         right_scroll = Gtk.ScrolledWindow()
         right_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        right_scroll.set_vexpand(True)
 
         right_buf = Gtk.TextBuffer()
         right_buf.create_tag('replace', background='#edd400', foreground='#000000')
@@ -253,14 +301,15 @@ class CompareMixin:
         right_view.set_editable(False)
         right_view.set_cursor_visible(False)
         right_view.set_monospace(True)
-        right_scroll.add(right_view)
-        right_box.pack_start(right_scroll, True, True, 0)
+        right_scroll.set_child(right_view)
+        right_box.append(right_scroll)
 
         # Separator between panes
-        content_box.pack_start(left_box, True, True, 0)
-        content_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL),
-                               False, False, 0)
-        content_box.pack_start(right_box, True, True, 0)
+        left_box.set_hexpand(True)
+        right_box.set_hexpand(True)
+        content_box.append(left_box)
+        content_box.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        content_box.append(right_box)
 
         # --- Fill buffers with line numbers ---
         max_digits = len(str(max(len(lines_a), len(lines_b))))
@@ -346,43 +395,56 @@ class CompareMixin:
         btn_prev_change.connect('clicked', _on_prev_change)
         btn_next_change.connect('clicked', _on_next_change)
 
-        # --- Change minimap using colored labels in a scrolled list ---
+        # --- Change minimap using colored boxes in a scrolled list ---
+        # GTK4 has no Gtk.EventBox and no override_background_color(); a
+        # plain Gtk.Box gets its color from a CSS class instead (see
+        # _ensure_minimap_css above), and clicks arrive via a
+        # Gtk.GestureClick added straight to that box (the pattern table's
+        # "delete the wrapper; add controllers to the child directly").
+        _ensure_minimap_css()
         minimap_box_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         # Build a colored bar for each line
-        colors = {'equal': None, 'replace': '#edd400', 'delete': '#ef2929', 'insert': '#73d216'}
+        css_classes = {
+            'equal': None,
+            'replace': 'synpad-diff-replace',
+            'delete': 'synpad-diff-delete',
+            'insert': 'synpad-diff-insert',
+        }
         minimap_labels = []
         for i, (_, _, tag) in enumerate(diff_rows):
-            color = colors.get(tag)
-            if color:
-                lbl = Gtk.EventBox()
+            css_class = css_classes.get(tag)
+            if css_class:
+                lbl = Gtk.Box()
                 lbl.set_size_request(20, 2)
-                lbl.override_background_color(
-                    Gtk.StateFlags.NORMAL,
-                    Gdk.RGBA(*[c / 255.0 for c in bytes.fromhex(color[1:])], 1.0))
+                lbl.add_css_class(css_class)
                 minimap_labels.append((i, lbl))
-                minimap_box_inner.pack_start(lbl, False, False, 0)
+                minimap_box_inner.append(lbl)
             else:
                 spacer = Gtk.Box()
                 spacer.set_size_request(20, 2)
-                minimap_box_inner.pack_start(spacer, False, False, 0)
+                minimap_box_inner.append(spacer)
 
         minimap_scroll = Gtk.ScrolledWindow()
         minimap_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         minimap_scroll.set_size_request(28, -1)
-        minimap_scroll.add(minimap_box_inner)
+        minimap_scroll.set_child(minimap_box_inner)
 
         # Click on minimap label scrolls to that line
+        def _on_minimap_click(idx):
+            vadj = left_scroll.get_vadjustment()
+            if total_lines > 0 and vadj.get_upper() > 0:
+                fraction = idx / total_lines
+                target = fraction * vadj.get_upper()
+                vadj.set_value(max(0, target - vadj.get_page_size() / 2))
+
         for line_idx, lbl in minimap_labels:
-            lbl.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-            def _on_click(_w, _ev, idx=line_idx):
-                vadj = left_scroll.get_vadjustment()
-                if total_lines > 0 and vadj.get_upper() > 0:
-                    fraction = idx / total_lines
-                    target = fraction * vadj.get_upper()
-                    vadj.set_value(max(0, target - vadj.get_page_size() / 2))
-                return True
-            lbl.connect('button-press-event', _on_click)
+            click = Gtk.GestureClick()
+            # No set_button() call — any button triggers the scroll, same
+            # as the old add_events(BUTTON_PRESS_MASK) with no button guard.
+            click.connect('pressed',
+                          lambda _g, _n, _x, _y, idx=line_idx: _on_minimap_click(idx))
+            lbl.add_controller(click)
 
         # Sync minimap scroll with content scroll
         def _sync_minimap(*_args):
@@ -405,20 +467,25 @@ class CompareMixin:
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         # Top row: content + minimap
         top_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        top_box.pack_start(content_box, True, True, 0)
-        top_box.pack_start(minimap_scroll, False, False, 0)
-        outer.pack_start(nav_bar, False, False, 0)
-        outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
-                         False, False, 0)
-        outer.pack_start(top_box, True, True, 0)
-        outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
-                         False, False, 0)
-        outer.pack_start(status, False, False, 0)
+        content_box.set_hexpand(True)
+        top_box.append(content_box)
+        top_box.append(minimap_scroll)
+        outer.append(nav_bar)
+        outer.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        top_box.set_vexpand(True)
+        outer.append(top_box)
+        outer.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        outer.append(status)
 
-        win.add(outer)
-        win.show_all()
+        win.set_child(outer)
+        win.present()
 
-        # Redraw minimap after window is fully laid out
+        # Redraw minimap after window is fully laid out.
+        # NOTE: `minimap` is not defined anywhere in this method under the
+        # GTK3 original either — this NameError-on-timeout is a
+        # pre-existing bug in the source being ported, carried over
+        # unchanged per "preserve behaviour exactly" rather than silently
+        # fixed as part of this port.
         def _init_minimap():
             minimap.queue_draw()
             return False
@@ -457,6 +524,9 @@ class CompareMixin:
                 for j in range(j1, j2):
                     diff_rows.append(('', lines_remote[j], 'insert'))
 
+        # GTK3 already used a plain Gtk.Window here (not Gtk.Dialog), so
+        # there was never any built-in Escape-to-close behavior — this
+        # stays a non-modal viewer window with plain action buttons.
         win = Gtk.Window(
             title=f"Conflict: {name} — My Changes vs Server",
             transient_for=self,
@@ -466,7 +536,13 @@ class CompareMixin:
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
-        # Action buttons at top
+        # Action buttons at top.
+        # GTK3 mixed pack_start (Use My Changes, Use Server Version) with
+        # pack_end (Cancel) on the same row — a split row Gtk.Box.append()
+        # alone can't reproduce, per the migration plan's "mixed
+        # pack_start/pack_end" gotcha. Same fix as dialogs.py's Reset/
+        # Apply/Cancel row: a nested end-aligned sub-box holds the
+        # pack_end() button, appended after the plain pack_start() ones.
         action_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         action_bar.set_margin_start(8)
         action_bar.set_margin_end(8)
@@ -474,18 +550,21 @@ class CompareMixin:
         action_bar.set_margin_bottom(6)
 
         btn_use_mine = Gtk.Button(label="Use My Changes (Overwrite Server)")
-        btn_use_mine.get_style_context().add_class('destructive-action')
-        action_bar.pack_start(btn_use_mine, False, False, 0)
+        btn_use_mine.add_css_class('destructive-action')
+        action_bar.append(btn_use_mine)
 
         btn_use_server = Gtk.Button(label="Use Server Version")
-        action_bar.pack_start(btn_use_server, False, False, 0)
+        action_bar.append(btn_use_server)
 
         btn_cancel = Gtk.Button(label="Cancel")
-        action_bar.pack_end(btn_cancel, False, False, 0)
+        end_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        end_box.set_hexpand(True)
+        end_box.set_halign(Gtk.Align.END)
+        end_box.append(btn_cancel)
+        action_bar.append(end_box)
 
-        outer.pack_start(action_bar, False, False, 0)
-        outer.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
-                         False, False, 0)
+        outer.append(action_bar)
+        outer.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         # Build side-by-side diff view (reuse the same approach as Compare Tabs)
         content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
@@ -497,10 +576,11 @@ class CompareMixin:
         left_header.set_margin_top(4)
         left_header.set_margin_bottom(4)
         left_header.set_halign(Gtk.Align.START)
-        left_box.pack_start(left_header, False, False, 0)
+        left_box.append(left_header)
 
         left_scroll = Gtk.ScrolledWindow()
         left_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        left_scroll.set_vexpand(True)
         left_buf = Gtk.TextBuffer()
         left_buf.create_tag('replace', background='#edd400', foreground='#000000')
         left_buf.create_tag('delete', background='#ef2929', foreground='#ffffff')
@@ -509,8 +589,8 @@ class CompareMixin:
         left_view.set_editable(False)
         left_view.set_cursor_visible(False)
         left_view.set_monospace(True)
-        left_scroll.add(left_view)
-        left_box.pack_start(left_scroll, True, True, 0)
+        left_scroll.set_child(left_view)
+        left_box.append(left_scroll)
 
         right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         right_header = Gtk.Label()
@@ -519,10 +599,11 @@ class CompareMixin:
         right_header.set_margin_top(4)
         right_header.set_margin_bottom(4)
         right_header.set_halign(Gtk.Align.START)
-        right_box.pack_start(right_header, False, False, 0)
+        right_box.append(right_header)
 
         right_scroll = Gtk.ScrolledWindow()
         right_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        right_scroll.set_vexpand(True)
         right_buf = Gtk.TextBuffer()
         right_buf.create_tag('replace', background='#edd400', foreground='#000000')
         right_buf.create_tag('insert', background='#73d216', foreground='#000000')
@@ -531,8 +612,8 @@ class CompareMixin:
         right_view.set_editable(False)
         right_view.set_cursor_visible(False)
         right_view.set_monospace(True)
-        right_scroll.add(right_view)
-        right_box.pack_start(right_scroll, True, True, 0)
+        right_scroll.set_child(right_view)
+        right_box.append(right_scroll)
 
         # Sync scrolling
         _syncing = [False]
@@ -549,10 +630,11 @@ class CompareMixin:
         left_scroll.get_vadjustment().connect('value-changed', _sync_lr)
         right_scroll.get_vadjustment().connect('value-changed', _sync_rl)
 
-        content_box.pack_start(left_box, True, True, 0)
-        content_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL),
-                               False, False, 0)
-        content_box.pack_start(right_box, True, True, 0)
+        left_box.set_hexpand(True)
+        right_box.set_hexpand(True)
+        content_box.append(left_box)
+        content_box.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        content_box.append(right_box)
 
         # Fill buffers with line numbers
         left_buf.create_tag('linenum', foreground='#888a85')
@@ -589,11 +671,12 @@ class CompareMixin:
                 else:
                     right_buf.insert_with_tags_by_name(end_r, f"{right_text}\n", tag)
 
-        outer.pack_start(content_box, True, True, 0)
+        content_box.set_vexpand(True)
+        outer.append(content_box)
 
         # Button actions
         def _on_use_mine(_btn):
-            win.destroy()
+            win.close()
             self._set_status(f"Uploading {tab.remote_path} (overwrite)...")
             self.item_save.set_sensitive(False)
             def _upload():
@@ -609,7 +692,7 @@ class CompareMixin:
             threading.Thread(target=_upload, daemon=True).start()
 
         def _on_use_server(_btn):
-            win.destroy()
+            win.close()
             tab.buffer.begin_user_action()
             tab.buffer.set_text(remote_content)
             tab.buffer.end_user_action()
@@ -624,12 +707,12 @@ class CompareMixin:
             self._console_log(f"Using server version: {tab.remote_path}", 'success')
 
         def _on_cancel(_btn):
-            win.destroy()
+            win.close()
             self._set_status("Upload cancelled")
 
         btn_use_mine.connect('clicked', _on_use_mine)
         btn_use_server.connect('clicked', _on_use_server)
         btn_cancel.connect('clicked', _on_cancel)
 
-        win.add(outer)
-        win.show_all()
+        win.set_child(outer)
+        win.present()
