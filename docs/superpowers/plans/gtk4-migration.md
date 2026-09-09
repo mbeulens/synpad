@@ -226,3 +226,24 @@ Tests: `tests/test_window_gtk4.py`; port `tests/test_tab_reorder.py` to
 - Confirm the app launches natively on Wayland and is absent from `xlsclients`.
 - Run the whole test suite; every test file must pass.
 - Update `MIGRATION-GTK4.md` to mark the port complete.
+
+### Settled: measuring widget allocations in this sandbox
+
+Two independent agents reproduced this; a third reported contrary numbers that
+could not be reproduced. Rely on the following.
+
+- A window's **initial** layout pass DOES yield real, non-zero allocations
+  (a plain window's box measured 1400x863; SynPadWindow's headerbar, tree
+  pane and tab bar all report correct pixel widths).
+- Any widget whose visibility or allocation changes **after** that first pass
+  never updates again, however long the main loop is pumped — including
+  blocking iteration, real-time sleeps and explicit
+  `frame_clock.request_phase()`. Reproduced on a bare `Gtk.Button`:
+  hide -> 0, re-show -> stays 0 permanently.
+- Practical consequence: anything hidden at construction and revealed later
+  (the Tools/console pane, `_console_visible = False`) cannot be verified by
+  pixel measurement here. Verify those structurally instead — assert the
+  properties that drive layout (`set_hexpand`, `set_halign`, child order) and
+  make the assertion mutation-sensitive.
+- Do not claim "allocation is unmeasurable in this sandbox" (false for the
+  first pass) nor "allocation is measurable" (false after it). State which.
