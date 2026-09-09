@@ -6,7 +6,7 @@ from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gdk, Gio, GLib
+from gi.repository import Graphene, Gtk, Gdk, Gio, GLib
 
 
 class LocalFilesMixin:
@@ -156,7 +156,31 @@ class LocalFilesMixin:
         toggle.set_button(1)
         toggle.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         toggle.connect('pressed', self._on_local_tree_single_click)
-        view.add_controller(toggle)
+        # Attach to the ScrolledWindow, NOT the TreeView. CAPTURE walks root
+        # down to target, so an ancestor's controller runs before any of the
+        # target's own -- including GTK's built-in expander gesture, which
+        # claims a press on the arrow and then does nothing with it. Attaching
+        # to the view itself is too late: measured across v2.0.11-2.0.13, a
+        # handler on the view is never invoked for an arrow press.
+        host = view.get_ancestor(Gtk.ScrolledWindow) or view
+        host.add_controller(toggle)
+        self._tree_toggle_view = view
+
+    @staticmethod
+    def _tree_toggle_coords(host, view, x, y):
+        """Translate a press from the gesture's widget into view coordinates.
+
+        The gesture lives on the ScrolledWindow, so its x/y are in that
+        widget's space; get_path_at_pos needs the TreeView's."""
+        if host is view:
+            return x, y
+        try:
+            ok, pt = host.compute_point(view, Graphene.Point().init(x, y))
+            if ok:
+                return pt.x, pt.y
+        except Exception:
+            pass
+        return x, y
 
     def _on_local_tree_single_click(self, gesture, n_press, x, y):
         """Toggle a directory row on a single primary click (GTK3 parity).
@@ -165,23 +189,15 @@ class LocalFilesMixin:
         opening remains a double-click as it was under GTK3."""
         if n_press != 1:
             return False
-        view = gesture.get_widget()
-        path_info = view.get_path_at_pos(int(x), int(y))
+        host = gesture.get_widget()
+        view = getattr(self, '_tree_toggle_view', None) or host
+        vx, vy = self._tree_toggle_coords(host, view, x, y)
+        path_info = view.get_path_at_pos(int(vx), int(vy))
         if not path_info:
             return False
         tree_path = path_info[0]
-        column = path_info[1]
-        # Leave the expander arrow to GTK. Its own gesture already toggles a
-        # press there; if we toggled too, the two would cancel out and the
-        # arrow would appear dead -- which is exactly what v2.0.11/2.0.12 did.
-        # The arrow sits left of the cell area, so anything at x < cell_area.x
-        # is GTK's to handle.
-        try:
-            cell = view.get_cell_area(tree_path, column)
-        except Exception:
-            cell = None
-        if cell is not None and int(x) < cell.x:
-            return False
+        # No expander-zone skip: GTK's own arrow handling is inert here, so we
+        # own the whole row including the arrow.
         try:
             tree_iter = self._local_store.get_iter(tree_path)
         except ValueError:

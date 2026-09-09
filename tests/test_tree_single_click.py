@@ -41,7 +41,8 @@ def build(store_cols=(str, str, str, bool, bool)):
     ir, tr = Gtk.CellRendererPixbuf(), Gtk.CellRendererText()
     col.pack_start(ir, False); col.pack_start(tr, True)
     view.append_column(col)
-    win = Gtk.Window(); win.set_child(view); win.set_default_size(400, 400)
+    scroll = Gtk.ScrolledWindow(); scroll.set_child(view)
+    win = Gtk.Window(); win.set_child(scroll); win.set_default_size(400, 400)
     return store, view, win
 
 # ---- remote tree ----------------------------------------------------------
@@ -61,13 +62,24 @@ f = store.append(None, ["index.php", "text-x-php", "/index.php", False, True])
 dpath, fpath = store.get_path(d), store.get_path(f)
 
 h._remote_attach_tree_controllers(view)
+scroll_host = view.get_ancestor(Gtk.ScrolledWindow)
 btns = [c.get_button() for c in view.observe_controllers() if isinstance(c, Gtk.GestureClick)]
-check("remote tree has a button-1 toggle gesture", 1 in btns, btns)
+host_btns = [c.get_button() for c in scroll_host.observe_controllers() if isinstance(c, Gtk.GestureClick)]
+check("toggle gesture is on the ScrolledWindow ancestor, not the view",
+      1 in host_btns, host_btns)
+# The view still carries GTK's own button-1/button-0 gestures; what matters
+# is that OUR toggle is not among them -- it must live on the ancestor.
+check("view carries our button-3 menu gesture", 3 in btns, btns)
+own_capture_b1 = [c for c in view.observe_controllers()
+                  if isinstance(c, Gtk.GestureClick) and c.get_button() == 1
+                  and c.get_propagation_phase() == Gtk.PropagationPhase.CAPTURE]
+check("only GTK's own button-1 capture gesture is on the view (exactly 1)",
+      len(own_capture_b1) == 1, len(own_capture_b1))
 check("remote tree keeps its button-3 menu gesture", 3 in btns, btns)
 # Must be CAPTURE: at BUBBLE this fired for clicks on the folder name but
 # NOT on the expander arrow, because GTK4's own CAPTURE-phase button-1
 # gesture claims an arrow press and does nothing with it.
-ours = [c for c in view.observe_controllers()
+ours = [c for c in scroll_host.observe_controllers()
         if isinstance(c, Gtk.GestureClick) and c.get_button() == 1
         and c.get_propagation_phase() == Gtk.PropagationPhase.CAPTURE]
 check("toggle gesture runs at CAPTURE so the expander arrow reaches it",
@@ -91,9 +103,10 @@ bg = view.get_background_area(dpath, view.get_column(0))
 arrow_x = bg.x + max(0, (area.x - bg.x) // 2)
 check("arrow zone exists left of the cell area", area.x > bg.x, (bg.x, area.x))
 was = view.row_expanded(dpath)
-r = h._on_tree_single_click(FakeGesture(view), 1, arrow_x, cy)
-check("click in the ARROW zone is left to GTK (we do not toggle)",
-      view.row_expanded(dpath) == was)
+h._on_tree_single_click(FakeGesture(view), 1, arrow_x, cy)
+check("click in the ARROW zone now toggles (GTK's own arrow is inert)",
+      view.row_expanded(dpath) != was)
+h._on_tree_single_click(FakeGesture(view), 1, arrow_x, cy)  # back to start
 
 check("directory starts collapsed", not view.row_expanded(dpath))
 h._on_tree_single_click(FakeGesture(view), 1, cx, cy)
