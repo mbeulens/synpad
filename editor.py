@@ -222,10 +222,52 @@ class EditorMixin:
             # there is nothing left to hide, so this call is simply removed.
             completion.set_property('select-on-show', True)
 
+            # SYNPAD_COMPLETION_DEBUG=1 logs provider setup to stderr. The
+            # completion machinery needs real focus and real key input, so it
+            # cannot be exercised headlessly -- this is the only way to see
+            # what it actually does in a running session.
+            import os as _os
+            _dbg = _os.environ.get('SYNPAD_COMPLETION_DEBUG')
+            view._completion_setup_count = getattr(
+                view, '_completion_setup_count', 0) + 1
+            if _dbg:
+                import sys as _sys
+                print(f"[completion] _setup_completion run "
+                      f"#{view._completion_setup_count} ext={ext!r} "
+                      f"lang_table={'yes' if ext in COMPLETION_LANGS else 'no'}",
+                      file=_sys.stderr, flush=True)
+
             providers, keep_alive = make_completion_providers(
                 COMPLETION_LANGS.get(ext), view.get_buffer())
             for provider in providers:
                 completion.add_provider(provider)
+
+            if _dbg:
+                import sys as _sys
+                seeded = keep_alive[0] if keep_alive else None
+                nwords = (len(seeded.get_text(seeded.get_start_iter(),
+                                              seeded.get_end_iter(),
+                                              False).split())
+                          if seeded is not None else 0)
+                print(f"[completion]   added {len(providers)} provider(s): "
+                      f"{[p.get_title() for p in providers]}; "
+                      f"seed words={nwords}", file=_sys.stderr, flush=True)
+
+                def _watch(*_a):
+                    ok, start, end = (True, None, None)
+                    try:
+                        b = view.get_buffer()
+                        ins = b.get_iter_at_mark(b.get_insert())
+                        line_start = ins.copy(); line_start.set_line_offset(0)
+                        typed = b.get_text(line_start, ins, False)
+                    except Exception as e:
+                        typed = f"<err {e}>"
+                    print(f"[completion] buffer changed, current line prefix="
+                          f"{typed[-24:]!r} providers still attached="
+                          f"{len(getattr(view, '_completion_providers', []))} "
+                          f"keepalive={bool(getattr(view, '_completion_keepalive', None))}",
+                          file=_sys.stderr, flush=True)
+                view.get_buffer().connect('changed', _watch)
             # CompletionWords does not own the buffers it scans, so the seeded
             # language buffer must outlive this function or its words vanish.
             view._completion_providers = providers
