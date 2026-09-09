@@ -994,6 +994,13 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         key_ctrl.connect('key-pressed', self._on_key_press)
         self.add_controller(key_ctrl)
+        # Kept as an attribute so tests can identify *this* controller
+        # specifically, rather than asserting "any CAPTURE-phase
+        # EventControllerKey exists on the window" — GtkWindow ships its
+        # own unnamed CAPTURE-phase EventControllerKey (for mnemonics),
+        # so that broader assertion would pass whether or not this fix
+        # is actually present (fix round 2 finding).
+        self._key_ctrl = key_ctrl
         self.btn_connect.connect('clicked', self._on_connect)
         self.btn_disconnect.connect('clicked', self._on_disconnect)
         self.btn_refresh.connect('clicked', self._on_refresh)

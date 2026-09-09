@@ -50,9 +50,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import gi
 gi.require_version('Gtk', '4.0')
-gi.require_version('GtkSource', '5')
+gi.require_version('GtkSource', '5')  # needed before `import editor` below
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, GtkSource, Gdk, GLib, Gio, Adw
+from gi.repository import Gtk, Adw
 
 if not Gtk.init_check():
     print("SKIP: no display")

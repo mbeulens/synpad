@@ -678,9 +678,20 @@ def dispatch_key(focus_widget, keyval, state=0):
 
 window_key_ctrls = [c for c in win.observe_controllers() if isinstance(c, Gtk.EventControllerKey)]
 check("window has a key controller", len(window_key_ctrls) >= 1)
-check("window's key controller runs at CAPTURE phase (C-1 fix)",
-      any(c.get_propagation_phase() == Gtk.PropagationPhase.CAPTURE for c in window_key_ctrls),
-      [c.get_propagation_phase() for c in window_key_ctrls])
+# Fix round 2: asserting "any CAPTURE-phase EventControllerKey exists on
+# the window" is vacuous — a bare Gtk.Window ships its own unnamed
+# CAPTURE-phase EventControllerKey (for mnemonics), so this would pass
+# whether or not _connect_signals()'s own controller is at CAPTURE.
+# window._key_ctrl is kept as an attribute specifically so tests can
+# identify *that* controller, not just "any" one — verified by reverting
+# window.py's set_propagation_phase(CAPTURE) call and confirming this
+# check (unlike the old any(...) version) then fails; see the report.
+check("window has kept a reference to its own key controller (window._key_ctrl)",
+      hasattr(win, '_key_ctrl') and isinstance(win._key_ctrl, Gtk.EventControllerKey))
+check("window._key_ctrl specifically — not just some key controller on "
+      "the window — runs at CAPTURE phase (C-1 fix)",
+      win._key_ctrl.get_propagation_phase() == Gtk.PropagationPhase.CAPTURE,
+      win._key_ctrl.get_propagation_phase())
 
 win._open_local_file(make_local_file('keytest.txt'))
 page_key = win.notebook.get_selected_page()
