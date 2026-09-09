@@ -264,6 +264,14 @@ class EditorMixin:
         tab_box.append(close_btn)
 
         click = Gtk.GestureClick()
+        # GtkGestureSingle:button defaults to 1 (primary), not "any
+        # button" — left unset, this gesture would silently never fire
+        # for the button-2/button-3 presses _on_tab_right_click filters
+        # for, making the entire tab context menu (and middle-click
+        # close) unreachable. 0 means "any button"; the handler's own
+        # `button not in (2, 3)` check still filters exactly as GTK3's
+        # `event.button` check did.
+        click.set_button(0)
         click.connect('pressed', self._on_tab_right_click)
         tab_box.add_controller(click)
 

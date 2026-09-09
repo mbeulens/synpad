@@ -29,7 +29,7 @@ save_config is monkeypatched at module level before any dialog is
 exercised (editor.py calls save_config() from code paths these tests
 exercise, per the migration plan's dialog-side-effect gotcha).
 """
-import os, sys, tempfile, shutil
+import os, sys, tempfile, shutil, contextlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -120,6 +120,47 @@ def capture_alert(build_fn):
     finally:
         editor.Adw.AlertDialog = _Real
     return captured[0] if captured else None
+
+
+@contextlib.contextmanager
+def capture_c_stderr():
+    """Capture C-level stderr (fd 2) written during the block.
+
+    GLib's default log handler (what prints "Gtk-WARNING **: ...") writes
+    straight to the process's stderr file descriptor via fprintf(), which
+    bypasses Python's sys.stderr object entirely — redirecting sys.stderr
+    (e.g. contextlib.redirect_stderr) sees nothing. Only fd-level
+    redirection catches it. Comparing buffer *content* before/after a
+    set_text()-in-user-action regression is not enough to detect it — the
+    content is byte-identical either way, only the emitted warning differs
+    — this is what actually distinguishes "no warning" from "warning
+    ignored". Yields a dict; after the block, result['output'] holds
+    whatever was written to fd 2."""
+    sys.stderr.flush()
+    stderr_fd = sys.stderr.fileno()
+    saved_fd = os.dup(stderr_fd)
+    read_fd, write_fd = os.pipe()
+    os.dup2(write_fd, stderr_fd)
+    os.close(write_fd)
+    result = {'output': ''}
+    try:
+        yield result
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved_fd, stderr_fd)
+        os.close(saved_fd)
+        os.set_blocking(read_fd, False)
+        chunks = []
+        try:
+            while True:
+                chunk = os.read(read_fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except BlockingIOError:
+            pass
+        os.close(read_fd)
+        result['output'] = b''.join(chunks).decode('utf-8', errors='replace')
 
 
 def fake_choose_response(response):
@@ -229,14 +270,55 @@ def make_tab(name, content='hello\nworld\n', is_local=True, modified=False):
 
 # =====================================================================
 # GtkSource is at version 5; TypeScript bundled language spec resolves
+# — and is genuinely SynPad's bundled spec, not GtkSourceView 5's own
+# native typescript.lang (GSV5 ships one at
+# /usr/share/gtksourceview-5/language-specs/typescript.lang — a
+# do-nothing _register_bundled_languages would still resolve
+# get_language('typescript') to *that*, and both the "resolves" check and
+# the four extension-mapping checks below would still pass, since neither
+# cares which spec answered. A fresh LanguageManager (not the process-wide
+# default(), which other code in this file may have already prepended
+# onto) plus checking search-path order and the resolved language's style
+# ids — SynPad's spec defines exactly 3
+# (typescript:built-in-type/keyword/type); GSV5's native one defines ~34
+# unrelated ones (typescript:enum-declaration, typescript:decorator, ...)
+# — is what actually tells the two apart.
 # =====================================================================
 
 check("GtkSource major version is 5", GtkSource.MAJOR_VERSION == 5, GtkSource.MAJOR_VERSION)
 
+spec_dir = os.path.join(os.path.dirname(os.path.abspath(editor.__file__)), 'language-specs')
+fresh_lang_mgr = GtkSource.LanguageManager()
+check("bundled spec dir is not already on a fresh manager's search path "
+      "(clean baseline for the next check)",
+      spec_dir not in fresh_lang_mgr.get_search_path(),
+      fresh_lang_mgr.get_search_path())
+
+editor._register_bundled_languages(fresh_lang_mgr)
+after_path = fresh_lang_mgr.get_search_path()
+check("_register_bundled_languages actually prepends the bundled spec dir "
+      "(a no-op body would still pass every check below, since GSV5 ships "
+      "its own native typescript.lang)",
+      after_path[0] == spec_dir, after_path)
+
+ts_lang_fresh = fresh_lang_mgr.get_language('typescript')
+check("bundled TypeScript language spec resolves under GtkSourceView 5",
+      ts_lang_fresh is not None, ts_lang_fresh)
+
+bundled_style_ids = set(ts_lang_fresh.get_style_ids()) if ts_lang_fresh else set()
+check("resolved TypeScript language's style ids are SynPad's bundled "
+      "spec's own 3 (built-in-type/keyword/type), not GSV5's native "
+      "typescript.lang's ~34 unrelated ones -- proves the *bundled* spec "
+      "answered, not GSV5's native one shadowing it",
+      bundled_style_ids == {'typescript:built-in-type', 'typescript:keyword',
+                             'typescript:type'},
+      bundled_style_ids)
+
 lang_mgr = GtkSource.LanguageManager.get_default()
 editor._register_bundled_languages(lang_mgr)
 ts_lang = lang_mgr.get_language('typescript')
-check("bundled TypeScript language spec resolves under GtkSourceView 5",
+check("bundled TypeScript language spec also resolves via the shared "
+      "default LanguageManager (what _create_editor_tab actually uses)",
       ts_lang is not None, ts_lang)
 
 for ext, expected in [('foo.ts', 'typescript'), ('foo.tsx', 'typescript'),
@@ -263,6 +345,19 @@ check("tab label widget is a Box directly (EventBox wrapper removed)",
 gestures = [c for c in tab_box.observe_controllers() if isinstance(c, Gtk.GestureClick)]
 check("tab_box has a GestureClick for right/middle-click (EventBox's button-press-event)",
       len(gestures) >= 1, gestures)
+# GtkGestureSingle:button defaults to 1 (primary) -- NOT "any button". Left
+# unset, GTK's own dispatch filters out every button-2/button-3 press
+# before _on_tab_right_click's own `button not in (2, 3)` check ever runs,
+# making the entire tab context menu (and middle-click close) unreachable
+# in the real app even though calling the handler directly (as the tests
+# below do) can't see that: a directly-constructed FakeGesture/real-gesture
+# call bypasses GTK's own button-filtering dispatch entirely. This is the
+# one assertion in this file that actually exercises GTK's dispatch gate
+# rather than the handler's own logic.
+check("tab_box's GestureClick listens for ANY button (button=0), not just "
+      "the primary button (GtkGestureSingle:button defaults to 1)",
+      all(g.get_button() == 0 for g in gestures),
+      [g.get_button() for g in gestures])
 
 close_btns = [b for b in find_all(tab_box, Gtk.Button)]
 check("tab_box contains exactly the close button", len(close_btns) == 1, close_btns)
@@ -985,15 +1080,23 @@ finally:
 # irreversible action while in user action") if called inside an already
 # -open begin_user_action()/end_user_action() pair (as _do_upload's
 # _load_remote also did — see its fix above). delete()+insert() replaces
-# set_text() in both to avoid it; G_DEBUG=fatal-warnings turns any
-# recurrence into a crash, which is how this was originally found.
+# set_text() in both to avoid it. Buffer *content* is byte-identical
+# whether or not the warning fires, so the content-only checks below don't
+# by themselves prove the warning is gone — capture_c_stderr() around each
+# call does (GLib writes Gtk-WARNING straight to the C stderr fd, bypassing
+# sys.stderr, so it must be caught at the fd level, not via redirect_stderr).
 # =====================================================================
 
-_, tab_json = make_tab('pretty.json', '{"b": 2, "a": 1}')
-h._on_pretty_print_json()
+with capture_c_stderr() as stderr_cap:
+    _, tab_json = make_tab('pretty.json', '{"b": 2, "a": 1}')
+    h._on_pretty_print_json()
+check("JSON pretty-print emits no Gtk-WARNING at all (fd-level stderr capture)",
+      stderr_cap['output'] == '', stderr_cap['output'])
+check("...specifically not the set_text-in-user-action one",
+      'irreversible action' not in stderr_cap['output'], stderr_cap['output'])
 pretty_text = tab_json.buffer.get_text(
     tab_json.buffer.get_start_iter(), tab_json.buffer.get_end_iter(), True)
-check("JSON pretty-print reformats without a Gtk-WARNING (set_text-in-user-action)",
+check("JSON pretty-print reformats correctly",
       pretty_text == '{\n    "b": 2,\n    "a": 1\n}', pretty_text)
 check("JSON pretty-print reports status", h.status[-1] == "JSON formatted", h.status[-1])
 
@@ -1003,14 +1106,41 @@ h._on_pretty_print_json()
 check("invalid JSON reports an error instead of crashing",
       h.errors and h.errors[-1][0] == "JSON Error", h.errors)
 
-_, tab_xml = make_tab('pretty.xml', '<a><b>1</b></a>')
-h._on_pretty_print_xml()
+with capture_c_stderr() as stderr_cap2:
+    _, tab_xml = make_tab('pretty.xml', '<a><b>1</b></a>')
+    h._on_pretty_print_xml()
+check("XML pretty-print emits no Gtk-WARNING at all (fd-level stderr capture)",
+      stderr_cap2['output'] == '', stderr_cap2['output'])
+check("...specifically not the set_text-in-user-action one",
+      'irreversible action' not in stderr_cap2['output'], stderr_cap2['output'])
 pretty_xml = tab_xml.buffer.get_text(
     tab_xml.buffer.get_start_iter(), tab_xml.buffer.get_end_iter(), True)
-check("XML pretty-print reformats without a Gtk-WARNING (set_text-in-user-action)",
+check("XML pretty-print reformats correctly",
       '<a>' in pretty_xml and '<b>' in pretty_xml and pretty_xml != '<a><b>1</b></a>',
       pretty_xml)
 check("XML pretty-print reports status", h.status[-1] == "XML formatted", h.status[-1])
+
+# Prove capture_c_stderr() itself actually detects the warning (otherwise
+# an empty-string result above would be meaningless): temporarily revert
+# to the old set_text()-inside-a-user-action shape and confirm it's caught.
+def _regressed_pretty_print_json(self):
+    page_num = self.notebook.get_current_page()
+    tab = self.tabs.get(page_num)
+    buf = tab.buffer
+    text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+    import json as _json
+    pretty = _json.dumps(_json.loads(text), indent=4)
+    buf.begin_user_action()
+    buf.set_text(pretty)  # the pre-fix shape
+    buf.end_user_action()
+
+pn_regress, tab_regress = make_tab('regress.json', '{"a": 1}')
+with capture_c_stderr() as regress_cap:
+    _regressed_pretty_print_json(h)
+check("capture_c_stderr() harness actually detects the set_text-in-user-action "
+      "warning when it's reintroduced (proves the two checks above aren't vacuous)",
+      'irreversible action' in regress_cap['output'], regress_cap['output'])
+h._do_close_tab(pn_regress)
 
 force_close_all_tabs()
 
