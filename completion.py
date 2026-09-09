@@ -340,23 +340,35 @@ def make_completion_providers(lang_dict, doc_buffer):
     as long as the tab lives: it holds the hidden GtkSource.Buffer seeded with
     the language words, which CompletionWords does not own.
     """
-    providers = []
+    # One provider, both buffers registered. CompletionWords is designed to
+    # scan several buffers (register() can be called repeatedly); using two
+    # separate instances of the same provider type was not the documented
+    # usage and is the only structural difference from a plain setup.
+    words = GtkSource.CompletionWords.new('SynPad')
+    words.set_property('minimum-word-size', 2)
+    words.set_property('priority', 1)
+    # Defaults are 50 lines / 300 proposals per batch. The seeded language
+    # table is far larger than a typical document, and a partially-scanned
+    # buffer yields completions that appear to work intermittently.
+    words.set_property('scan-batch-size', 500)
+    words.set_property('proposals-batch-size', 1000)
+    words.register(doc_buffer)
+
+    providers = [words]
     keep_alive = []
 
     if lang_dict:
+        # Lay the words out over multiple lines rather than one very long one.
+        # CompletionWords scans by LINE (scan-batch-size defaults to 50 lines),
+        # so a single ~900-word line is one line's worth of work and is the
+        # kind of shape a per-line limit would silently truncate. Chunking at
+        # 20 words gives ~45 lines for PHP -- still inside one batch, so the
+        # whole list is indexed in a single pass.
+        names = sorted(lang_dict.keys())
+        lines = [" ".join(names[i:i + 20]) for i in range(0, len(names), 20)]
         seed = GtkSource.Buffer()
-        seed.set_text(" ".join(sorted(lang_dict.keys())))
-        lang_words = GtkSource.CompletionWords.new('SynPad')
-        lang_words.set_property('priority', 1)
-        lang_words.set_property('minimum-word-size', 2)
-        lang_words.register(seed)
-        providers.append(lang_words)
+        seed.set_text("\n".join(lines))
+        words.register(seed)
         keep_alive.append(seed)
-
-    doc_words = GtkSource.CompletionWords.new('Document')
-    doc_words.set_property('priority', 0)
-    doc_words.set_property('minimum-word-size', 3)
-    doc_words.register(doc_buffer)
-    providers.append(doc_words)
 
     return providers, keep_alive

@@ -33,7 +33,8 @@ def check(n, c, extra=""):
 # --- providers are the built-in C ones, never a Python subclass ------------
 buf = GtkSource.Buffer()
 provs, keep = make_completion_providers(PHP_COMPLETIONS, buf)
-check("two providers for a known language", len(provs) == 2, len(provs))
+check("one CompletionWords provider, both buffers registered",
+      len(provs) == 1, len(provs))
 check("both are built-in CompletionWords",
       all(isinstance(p, GtkSource.CompletionWords) for p in provs),
       [type(p).__name__ for p in provs])
@@ -41,12 +42,13 @@ check("no Python-implemented provider is used",
       all(type(p).__module__.startswith('gi.') for p in provs),
       [type(p).__module__ for p in provs])
 check("seeded language buffer is kept alive", len(keep) == 1 and isinstance(keep[0], GtkSource.Buffer))
-check("language provider outranks the document one",
-      provs[0].get_property('priority') > provs[1].get_property('priority'))
+check("provider has a sane minimum word size",
+      provs[0].get_property('minimum-word-size') == 2)
 
 # --- unknown language still gets document completion -----------------------
 p2, k2 = make_completion_providers(None, GtkSource.Buffer())
-check("unknown language: document provider only", len(p2) == 1 and k2 == [])
+check("unknown language: provider present, no seed buffer",
+      len(p2) == 1 and k2 == [])
 
 # --- the seed buffer really carries the language's words -------------------
 seed_text = keep[0].get_text(keep[0].get_start_iter(), keep[0].get_end_iter(), False)
