@@ -28,8 +28,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import gi
-gi.require_version('Gtk', '3.0')
-gi.require_version('GtkSource', '3.0')
+gi.require_version('Gtk', '4.0')
+gi.require_version('GtkSource', '5')
 from gi.repository import GtkSource
 
 from config import MAX_HIGHLIGHT_LINE_LEN

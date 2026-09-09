@@ -1,4 +1,51 @@
-"""SynPad editor mixin — tab management, save/upload, search, snippets."""
+"""SynPad editor mixin — tab management, save/upload, search, snippets.
+
+GTK4 notes:
+
+- `_close_tab`'s unsaved-changes confirmation is used both standalone (X
+  button, tab-menu "Close") and chained by `_close_all_tabs` /
+  `_close_all_tabs_except`, which must keep asking about the next tab
+  regardless of how the previous confirmation resolved. It therefore takes
+  an optional `callback`, invoked exactly once after the decision (close or
+  don't) is made, and uses a plain `Gtk.Window` with explicit Yes/No
+  buttons plus `close-request`/Escape wired to the same "don't close" path
+  — not `Adw.AlertDialog`, whose Escape/close handling is known (see
+  `remote.py`'s `_confirm_delete` docstring) to never invoke its
+  `choose()` callback at all when its parent is a plain `Gtk.Window`
+  (exactly what `SynPadWindow` is). A one-shot confirmation with no
+  chained continuation waiting on it (`_force_highlight`,
+  `_confirm_then_refresh`) is safe with `Adw.AlertDialog`: if Escape/close
+  never invokes the callback, nothing happens, which is the same outcome
+  as an explicit decline.
+- `_on_open_local_file` / `_on_save_local`'s file pickers move from
+  `Gtk.FileChooserDialog` + `.run()` (removed in GTK4, and the dialog
+  itself deprecated since 4.10) to the native async `Gtk.FileDialog`,
+  matching `connection.py`'s `_on_browse_key`. `Gtk.FileDialog.save()`
+  always confirms overwrite itself, replacing the old
+  `set_do_overwrite_confirmation(True)`.
+- `_on_goto_line`'s dialog and `_do_upload`'s `_ask_overwrite` are
+  custom-content dialogs (a spin button; a warning icon + four buttons),
+  so per the migration plan's dialog shapes they're plain `Gtk.Window`s
+  with explicit buttons, not `Adw.AlertDialog`. `_ask_overwrite` in
+  particular blocks a *background* thread on `queue.Queue.get()` while the
+  dialog is shown on the main thread via `GLib.idle_add` — closing it any
+  way other than a button click (Escape, titlebar, Alt-F4) must still
+  reach the queue or that worker thread hangs forever, so both are wired
+  to the Cancel path explicitly.
+- The tab-label context menu (right-click) and the editor's own
+  right-click menu convert `Gtk.Menu`/`Gtk.MenuItem` to `Gio.Menu` +
+  `Gtk.PopoverMenu` / `Gtk.TextView.set_extra_menu`, following
+  `local_files.py`'s/`remote.py`'s established pattern. GTK4 removed
+  `GtkTextView`'s `populate-popup` signal entirely (`GtkSource.View`
+  inherits from `GtkTextView`); the declarative `set_extra_menu(Gio.Menu)`
+  replaces it, built once per view instead of rebuilt on every popup.
+- The 4 outstanding `buf.get_iter_at_line(n)` sites now unpack the
+  `(ok, iter)` tuple GTK4 returns (`_on_goto_line`, `_try_expand_snippet`,
+  `_try_expand_docblock` x2). No other `get_iter_at_*`/`get_*_iter`
+  method here changed shape — verified by introspection.
+- `Gtk.Notebook` is untouched here per the migration plan — Task 5 owns
+  the `Adw.TabView` conversion.
+"""
 
 import hashlib
 import json
@@ -9,9 +56,10 @@ import time
 import traceback
 
 import gi
-gi.require_version('Gtk', '3.0')
-gi.require_version('GtkSource', '3.0')
-from gi.repository import Gtk, GtkSource, Gdk, GLib
+gi.require_version('Gtk', '4.0')
+gi.require_version('GtkSource', '5')
+gi.require_version('Adw', '1')
+from gi.repository import Gtk, GtkSource, Gdk, GLib, Gio, Adw
 
 from config import (save_config, find_server_by_guid, CONFIG_DIR,
                     MAX_HIGHLIGHT_LINE_LEN)
@@ -28,9 +76,9 @@ _LANG_PATH_REGISTERED = False
 def _register_bundled_languages(lang_mgr):
     """Prepend SynPad's bundled language-specs dir to the LanguageManager
     search path so app-shipped syntax definitions (e.g. typescript.lang) are
-    found. GtkSourceView 3.x ships most specs compiled into the library and
-    has no TypeScript definition, so .ts files would otherwise be unhighlighted.
-    Idempotent — the default LanguageManager is a singleton."""
+    found. GtkSourceView ships most specs compiled into the library and has
+    no TypeScript definition of its own, so .ts files would otherwise be
+    unhighlighted. Idempotent — the default LanguageManager is a singleton."""
     global _LANG_PATH_REGISTERED
     if _LANG_PATH_REGISTERED:
         return
@@ -162,13 +210,16 @@ class EditorMixin:
         view.set_insert_spaces_instead_of_tabs(True)
         view.set_show_line_marks(True)
         view.set_monospace(True)
-        view.get_style_context().add_class('editor-view')
+        view.add_css_class('editor-view')
 
         # Code completion — deferred until widget is realized
         def _setup_completion(*_args):
             ext = self._get_file_ext(remote_path)
             completion = view.get_completion()
-            completion.set_property('show-headers', False)
+            # GtkSourceView 5's GtkSource.Completion dropped the
+            # 'show-headers' property entirely (verified by introspection —
+            # it's not in the GObject property list at all, unlike GSV3/4);
+            # there is nothing left to hide, so this call is simply removed.
             completion.set_property('select-on-show', True)
 
             if ext in COMPLETION_LANGS:
@@ -182,34 +233,46 @@ class EditorMixin:
 
         view.connect('realize', _setup_completion)
 
-        # Intercept Ctrl+F/R before GtkSourceView's built-in handlers
-        view.connect('key-press-event', self._on_editor_key_press)
+        # Intercept Ctrl+F/R/G/N/O/S and Tab (snippet expansion) before
+        # GtkSourceView's/GtkText's own key handling. CAPTURE phase runs
+        # top-down before the target widget's own (BUBBLE-phase) handling,
+        # same intent as GTK3's plain connect() (which ran before the
+        # class default handler).
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        key_ctrl.connect('key-pressed', self._on_editor_key_press)
+        view.add_controller(key_ctrl)
+
+        # Right-click → "Ask Claude" submenu (presets + Custom). GTK4 has no
+        # populate-popup signal; built once via set_extra_menu instead of
+        # rebuilt on every popup.
+        self._setup_editor_context_menu(view)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scroll.add(view)
+        scroll.set_child(view)
 
-        # Tab label with close button, wrapped in EventBox for right-click menu
+        # Tab label with close button. GTK4: no more EventBox wrapper —
+        # the right-click/middle-click gesture attaches straight to tab_box.
         tab_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         tab_label = Gtk.Label(label=os.path.basename(remote_path))
-        tab_box.pack_start(tab_label, True, True, 0)
+        tab_label.set_hexpand(True)
+        tab_box.append(tab_label)
         close_btn = Gtk.Button()
-        close_btn.set_relief(Gtk.ReliefStyle.NONE)
-        close_btn.set_image(Gtk.Image.new_from_icon_name('window-close-symbolic', Gtk.IconSize.MENU))
-        tab_box.pack_end(close_btn, False, False, 0)
+        close_btn.add_css_class('flat')
+        close_btn.set_icon_name('window-close-symbolic')
+        tab_box.append(close_btn)
 
-        tab_ebox = Gtk.EventBox()
-        tab_ebox.add(tab_box)
-        tab_ebox.connect('button-press-event', self._on_tab_right_click)
-        tab_ebox.show_all()
+        click = Gtk.GestureClick()
+        click.connect('pressed', self._on_tab_right_click)
+        tab_box.add_controller(click)
 
         # Remove welcome tab if present
         if self.notebook.get_n_pages() == 1 and not self.tabs:
             self.notebook.remove_page(0)
 
-        page_num = self.notebook.append_page(scroll, tab_ebox)
+        page_num = self.notebook.append_page(scroll, tab_box)
         self.notebook.set_tab_reorderable(scroll, True)
-        scroll.show_all()
         self.notebook.set_current_page(page_num)
 
         tab = OpenTab(remote_path, local_path, view, buf,
@@ -231,9 +294,6 @@ class EditorMixin:
 
         # Signature help popover — shows function signature under the cursor
         self._sighelp_attach(view, buf)
-
-        # Right-click → "Ask Claude" submenu (presets + Custom)
-        view.connect('populate-popup', self._on_editor_populate_popup)
 
         # Close button — find the current page_num dynamically, not from closure.
         # The X handler logs unconditionally and falls back to scanning
@@ -295,26 +355,108 @@ class EditorMixin:
             return lang_mgr.get_language(lang_id)
         return None
 
-    def _close_tab(self, page_num):
+    def _close_tab(self, page_num, callback=None):
+        """Close a tab; if modified, confirm first ("Unsaved Changes" ->
+        Yes/No). `callback` (if given) is invoked exactly once once the
+        decision is resolved — whether the tab was actually closed or the
+        close was declined — so callers that process several tabs in
+        sequence (`_close_all_tabs`, `_close_all_tabs_except`) can chain
+        through it. GTK4 has no blocking dialog API, so the old
+        synchronous "ask, then maybe proceed" shape becomes this
+        callback-driven continuation; the decision logic itself (Yes ->
+        close, anything else -> don't) is unchanged. See the module
+        docstring for why this is a plain Gtk.Window rather than
+        Adw.AlertDialog."""
         tab = self.tabs.get(page_num)
         self._debug(f"_close_tab: page_num={page_num}, tab={'found: ' + os.path.basename(tab.remote_path) if tab else 'NOT FOUND'}, tabs={list(self.tabs.keys())}")
         if not tab:
+            if callback:
+                callback()
             return
-        if tab.modified:
-            dlg = Gtk.MessageDialog(
-                transient_for=self, modal=True,
-                message_type=Gtk.MessageType.QUESTION,
-                buttons=Gtk.ButtonsType.YES_NO,
-                text="Unsaved Changes",
-            )
-            dlg.format_secondary_text(
-                f"'{os.path.basename(tab.remote_path)}' has unsaved changes. Close anyway?"
-            )
-            resp = dlg.run()
-            dlg.destroy()
-            if resp != Gtk.ResponseType.YES:
-                return
 
+        if tab.modified:
+            win = Gtk.Window(title="Unsaved Changes", transient_for=self, modal=True)
+            win.set_default_size(360, -1)
+
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            box.set_margin_start(12)
+            box.set_margin_end(12)
+            box.set_margin_top(12)
+            box.set_margin_bottom(12)
+            win.set_child(box)
+
+            label = Gtk.Label(
+                label=f"'{os.path.basename(tab.remote_path)}' has unsaved "
+                      f"changes. Close anyway?",
+                wrap=True, halign=Gtk.Align.START)
+            box.append(label)
+
+            resolved = [False]
+
+            def resolve(do_close):
+                # Guards against being invoked twice — a button click calls
+                # finish() which both resolves and win.close()s, and that
+                # close() itself raises 'close-request', whose handler also
+                # calls resolve().
+                if resolved[0]:
+                    return
+                resolved[0] = True
+                if do_close:
+                    self._do_close_tab(page_num)
+                if callback:
+                    callback()
+
+            def finish(do_close):
+                resolve(do_close)
+                win.close()
+
+            # ButtonsType.YES_NO rendered as [No, Yes] left-to-right in GTK3.
+            btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            btn_row.set_halign(Gtk.Align.END)
+            btn_no = Gtk.Button(label="No")
+            btn_no.connect('clicked', lambda _b: finish(False))
+            btn_yes = Gtk.Button(label="Yes")
+            btn_yes.add_css_class('suggested-action')
+            btn_yes.connect('clicked', lambda _b: finish(True))
+            btn_row.append(btn_no)
+            btn_row.append(btn_yes)
+            box.append(btn_row)
+
+            # A bare Gtk.Window has no built-in Escape-to-close behavior
+            # (unlike Gtk.Dialog) — wire it explicitly to the same "don't
+            # close" path the No button takes.
+            def on_key(_ctrl, keyval, _keycode, _state):
+                if keyval == Gdk.KEY_Escape:
+                    finish(False)
+                    return True
+                return False
+            key_ctrl = Gtk.EventControllerKey()
+            key_ctrl.connect('key-pressed', on_key)
+            win.add_controller(key_ctrl)
+
+            # Titlebar close/Alt-F4/destroyed transient parent all raise
+            # 'close-request' without going through No/Yes/Escape — resolve
+            # as "don't close" (same as No) so callback still fires exactly
+            # once, and let default handling actually tear the window down.
+            def on_close_request(_win):
+                resolve(False)
+                return False
+            win.connect('close-request', on_close_request)
+
+            win.present()
+            return
+
+        self._do_close_tab(page_num)
+        if callback:
+            callback()
+
+    def _do_close_tab(self, page_num):
+        """Actually remove a tab's page and clean up bookkeeping — the part
+        of the old synchronous _close_tab that ran unconditionally once
+        past the (now-async) unsaved-changes confirmation."""
+        tab = self.tabs.get(page_num)
+        if not tab:
+            return
         self.notebook.remove_page(page_num)
         del self.tabs[page_num]
         # Re-index tabs after removal
@@ -323,7 +465,6 @@ class EditorMixin:
         if self.notebook.get_n_pages() == 0:
             welcome = Gtk.Label(label="Connect to an FTP/SFTP server and open a file to start editing.")
             welcome.set_margin_top(40)
-            welcome.show()
             self.notebook.append_page(welcome, Gtk.Label(label="Welcome"))
 
     def _setup_tab_reordering(self):
@@ -347,12 +488,32 @@ class EditorMixin:
 
     # -- Tab Context Menu -----------------------------------------------------
 
-    def _on_tab_right_click(self, widget, event):
+    def _tab_ctx_ensure_popover(self, widget):
+        """Lazily create the tab context-menu popover and (re-)anchor it to
+        `widget` (whichever tab's label Box was clicked). GTK4 popovers
+        hold exactly one parent: unparent before re-parenting."""
+        if getattr(self, '_tab_ctx_popover', None) is None:
+            self._tab_ctx_popover = Gtk.PopoverMenu()
+        pop = self._tab_ctx_popover
+        if pop.get_parent() is not widget:
+            if pop.get_parent() is not None:
+                pop.unparent()
+            pop.set_parent(widget)
+        return pop
+
+    def _on_tab_right_click(self, gesture, n_press, x, y):
         """Right-click → context menu; middle-click → close tab.
 
         Middle-click acts as an always-available escape hatch when the X
-        button is unreachable (e.g. captured by a stuck popover)."""
-        if event.button not in (2, 3):
+        button is unreachable (e.g. captured by a stuck popover).
+
+        GTK4: Gtk.Menu/Gtk.MenuItem -> Gio.Menu model + Gtk.PopoverMenu,
+        actions via Gio.SimpleAction, same pattern as local_files.py's/
+        remote.py's tree context menus. The GestureClick is attached
+        directly to tab_box (the old EventBox wrapper is gone)."""
+        widget = gesture.get_widget()
+        button = gesture.get_current_button()
+        if button not in (2, 3):
             return False
 
         # Find which page this tab belongs to
@@ -366,133 +527,175 @@ class EditorMixin:
         if clicked_page is None or clicked_page not in self.tabs:
             return False
 
-        if event.button == 2:
+        if button == 2:
             self._console_log(
                 f"Tab middle-click close: page_num={clicked_page}",
                 'timestamp')
             self._close_tab(clicked_page)
             return True
 
-        menu = Gtk.Menu()
-
         tab = self.tabs[clicked_page]
         reload_label = "Reload from Disk" if tab.is_local else "Reload from Server"
-        item_reload = Gtk.MenuItem(label=reload_label)
+
+        menu = Gio.Menu()
+        group = Gio.SimpleActionGroup()
+
+        def add_action(section, action_name, label, callback, enabled=True):
+            action = Gio.SimpleAction.new(action_name, None)
+            action.connect('activate', lambda _a, _p: callback())
+            action.set_enabled(enabled)
+            group.add_action(action)
+            section.append(label, f'tabctx.{action_name}')
+
+        sec1 = Gio.Menu()
         # A never-saved local tab has nothing on disk to reload from.
-        if tab.is_local and (not tab.local_path or not os.path.exists(tab.local_path)):
-            item_reload.set_sensitive(False)
-        item_reload.connect('activate', lambda _: self._confirm_then_refresh(tab))
-        menu.append(item_reload)
+        reload_enabled = not (tab.is_local and
+                              (not tab.local_path or not os.path.exists(tab.local_path)))
+        add_action(sec1, 'reload', reload_label,
+                   lambda: self._confirm_then_refresh(tab), enabled=reload_enabled)
 
         # Only offered when a long line made us skip highlighting — turning it
         # on can block the UI for a long time, so it stays an explicit choice.
         if tab.highlight_suppressed:
-            item_hl = Gtk.MenuItem(label="Enable Syntax Highlighting (slow)")
-            item_hl.connect('activate', lambda _: self._force_highlight(tab))
-            menu.append(item_hl)
+            add_action(sec1, 'enable_hl', "Enable Syntax Highlighting (slow)",
+                       lambda: self._force_highlight(tab))
+        menu.append_section(None, sec1)
 
-        menu.append(Gtk.SeparatorMenuItem())
+        sec2 = Gio.Menu()
+        add_action(sec2, 'close', "Close", lambda: self._close_tab(clicked_page))
+        add_action(sec2, 'close_all', "Close All", lambda: self._close_all_tabs())
+        add_action(sec2, 'close_others', "Close All But This",
+                   lambda: self._close_all_tabs_except(clicked_page))
+        menu.append_section(None, sec2)
 
-        item_close = Gtk.MenuItem(label="Close")
-        item_close.connect('activate', lambda _: self._close_tab(clicked_page))
-        menu.append(item_close)
+        popover = self._tab_ctx_ensure_popover(widget)
+        popover.set_menu_model(menu)
+        widget.insert_action_group('tabctx', group)
 
-        item_close_all = Gtk.MenuItem(label="Close All")
-        item_close_all.connect('activate', lambda _: self._close_all_tabs())
-        menu.append(item_close_all)
-
-        item_close_others = Gtk.MenuItem(label="Close All But This")
-        item_close_others.connect('activate',
-                                  lambda _: self._close_all_tabs_except(clicked_page))
-        menu.append(item_close_others)
-
-        menu.show_all()
-        menu.popup_at_pointer(event)
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+        popover.popup()
         return True
 
     def _force_highlight(self, tab):
         """Turn syntax highlighting on for a tab where a long line suppressed it.
 
         Confirms first: GtkSourceView's per-line cost means this can lock the UI
-        for a minute or more on the very files that triggered the guard."""
+        for a minute or more on the very files that triggered the guard.
+
+        GTK4: a one-shot Yes/No decision with nothing chained on it, so
+        Adw.AlertDialog is safe here (see module docstring) — if Escape/
+        close never invokes the callback, highlighting simply stays off,
+        the same outcome as clicking Cancel."""
         buf = tab.buffer
         longest = max_line_length(
             buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True))
-        dlg = Gtk.MessageDialog(
-            transient_for=self, modal=True,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.OK_CANCEL,
-            text="Enable syntax highlighting?",
+        dlg = Adw.AlertDialog(
+            heading="Enable syntax highlighting?",
+            body=(f"{os.path.basename(tab.remote_path)} has a line of "
+                  f"{longest:,} characters. Highlighting it may freeze "
+                  f"SynPad for a long time and cannot be interrupted.\n\n"
+                  f"Enable anyway?"),
         )
-        dlg.format_secondary_text(
-            f"{os.path.basename(tab.remote_path)} has a line of {longest:,} "
-            f"characters. Highlighting it may freeze SynPad for a long time "
-            f"and cannot be interrupted.\n\nEnable anyway?"
-        )
-        resp = dlg.run()
-        dlg.destroy()
-        if resp != Gtk.ResponseType.OK:
-            return
+        dlg.add_response('cancel', "Cancel")
+        dlg.add_response('ok', "OK")
+        dlg.set_default_response('cancel')
+        dlg.set_close_response('cancel')
 
-        self._set_status(
-            f"Highlighting {os.path.basename(tab.remote_path)} — this may take a while...")
-        # Let the status text paint before the main loop stalls.
-        while Gtk.events_pending():
-            Gtk.main_iteration_do(False)
+        def on_response(dlg, res):
+            try:
+                response = dlg.choose_finish(res)
+            except Exception:
+                return
+            if response != 'ok':
+                return
 
-        started = time.monotonic()
-        buf.set_highlight_syntax(True)
-        tab.highlight_suppressed = False
-        self._console_log(
-            f"Syntax highlighting forced on for "
-            f"'{os.path.basename(tab.remote_path)}' "
-            f"(longest line {longest:,} chars) after "
-            f"{time.monotonic() - started:.1f}s", 'timestamp')
-        self._set_status(f"Highlighting enabled for {os.path.basename(tab.remote_path)}")
+            self._set_status(
+                f"Highlighting {os.path.basename(tab.remote_path)} — this may take a while...")
+            # Let the status text paint before the main loop stalls.
+            ctx = GLib.MainContext.default()
+            while ctx.pending():
+                ctx.iteration(False)
+
+            started = time.monotonic()
+            buf.set_highlight_syntax(True)
+            tab.highlight_suppressed = False
+            self._console_log(
+                f"Syntax highlighting forced on for "
+                f"'{os.path.basename(tab.remote_path)}' "
+                f"(longest line {longest:,} chars) after "
+                f"{time.monotonic() - started:.1f}s", 'timestamp')
+            self._set_status(f"Highlighting enabled for {os.path.basename(tab.remote_path)}")
+
+        dlg.choose(self, None, on_response)
 
     def _close_all_tabs(self):
-        """Close all open tabs."""
-        # Work on a copy since _close_tab modifies self.tabs
-        for page_num in sorted(self.tabs.keys(), reverse=True):
-            self._close_tab(page_num)
+        """Close all open tabs, confirming per modified tab.
+
+        GTK4 has no blocking confirm dialog, so this walks the same
+        precomputed reverse-page-order queue the old synchronous loop used,
+        but one tab at a time — each tab's _close_tab confirmation
+        continuation advances to the next. Removing a higher page_num never
+        renumbers the lower ones still queued, so precomputing the list up
+        front (rather than re-reading self.tabs.keys() at each step) is
+        still safe."""
+        self._close_tab_chain(sorted(self.tabs.keys(), reverse=True))
 
     def _close_all_tabs_except(self, keep_page):
-        """Close all tabs except the given page number."""
-        # Find the remote_path of the tab to keep (page nums shift as we close)
+        """Close all tabs except the given page number. See
+        _close_all_tabs for why this is now a queued async chain instead
+        of a synchronous loop."""
         keep_tab = self.tabs.get(keep_page)
         if not keep_tab:
             return
         keep_path = keep_tab.remote_path
-        for page_num in sorted(self.tabs.keys(), reverse=True):
-            tab = self.tabs.get(page_num)
-            if tab and tab.remote_path != keep_path:
-                self._close_tab(page_num)
+        queue = [pn for pn in sorted(self.tabs.keys(), reverse=True)
+                 if self.tabs.get(pn) and self.tabs[pn].remote_path != keep_path]
+        self._close_tab_chain(queue)
+
+    def _close_tab_chain(self, queue):
+        """Close tabs in `queue` (page numbers, highest first) one at a
+        time, waiting for each one's unsaved-changes confirmation to
+        resolve before moving on to the next."""
+        if not queue:
+            return
+        page_num, rest = queue[0], queue[1:]
+        self._close_tab(page_num, callback=lambda: self._close_tab_chain(rest))
 
     # -- Reload tab contents --------------------------------------------------
 
     def _confirm_then_refresh(self, tab):
         """Reload a tab's contents from disk (local) or server (remote).
-        Warns and requires confirmation before discarding unsaved edits."""
+        Warns and requires confirmation before discarding unsaved edits.
+
+        GTK4: a one-shot Cancel/Reload decision with nothing chained on it,
+        so Adw.AlertDialog is safe here (see module docstring)."""
         if tab.modified:
             src = "disk" if tab.is_local else "server"
-            dialog = Gtk.MessageDialog(
-                transient_for=self,
-                modal=True,
-                message_type=Gtk.MessageType.QUESTION,
-                buttons=Gtk.ButtonsType.NONE,
-                text="File has unsaved changes",
+            dlg = Adw.AlertDialog(
+                heading="File has unsaved changes",
+                body=(f"{os.path.basename(tab.remote_path)}\n\n"
+                      f"Reload from {src} and discard your unsaved changes?"),
             )
-            dialog.format_secondary_text(
-                f"{os.path.basename(tab.remote_path)}\n\n"
-                f"Reload from {src} and discard your unsaved changes?"
-            )
-            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-            dialog.add_button("Reload (discard my changes)", Gtk.ResponseType.ACCEPT)
-            dialog.set_default_response(Gtk.ResponseType.CANCEL)
-            response = dialog.run()
-            dialog.destroy()
-            if response != Gtk.ResponseType.ACCEPT:
-                return
+            dlg.add_response('cancel', "Cancel")
+            dlg.add_response('reload', "Reload (discard my changes)")
+            dlg.set_default_response('cancel')
+            dlg.set_close_response('cancel')
+
+            def on_response(dlg, res):
+                try:
+                    response = dlg.choose_finish(res)
+                except Exception:
+                    return
+                if response == 'reload':
+                    self._refresh_tab(tab)
+
+            dlg.choose(self, None, on_response)
+            return
         self._refresh_tab(tab)
 
     def _capture_view_state(self, tab):
@@ -609,21 +812,17 @@ class EditorMixin:
         self.item_save.set_sensitive(True)
 
     def _on_open_local_file(self):
-        """Open a file from the local filesystem."""
-        dlg = Gtk.FileChooserDialog(
-            title="Open Local File",
-            transient_for=self,
-            action=Gtk.FileChooserAction.OPEN,
-        )
-        dlg.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_OPEN, Gtk.ResponseType.OK,
-        )
-        # Add filters
+        """Open a file from the local filesystem.
+
+        GTK4: Gtk.FileChooserDialog + .run() -> the native async
+        Gtk.FileDialog (see module docstring). The decision logic (only
+        open when a file was actually chosen) is unchanged."""
+        dlg = Gtk.FileDialog()
+        dlg.set_title("Open Local File")
+
         filt_all = Gtk.FileFilter()
         filt_all.set_name("All files")
         filt_all.add_pattern("*")
-        dlg.add_filter(filt_all)
 
         filt_code = Gtk.FileFilter()
         filt_code.set_name("Code files")
@@ -631,22 +830,33 @@ class EditorMixin:
                      'css', 'json', 'xml', 'sql', 'sh', 'yml', 'yaml',
                      'md', 'txt', 'ini', 'conf', 'env']:
             filt_code.add_pattern(f"*.{ext}")
-        dlg.add_filter(filt_code)
+
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(filt_all)
+        filters.append(filt_code)
+        dlg.set_filters(filters)
+        dlg.set_default_filter(filt_all)
 
         # Remember last folder
         last_dir = self.config.get('last_save_dir', '')
         if last_dir and os.path.isdir(last_dir):
-            dlg.set_current_folder(last_dir)
+            dlg.set_initial_folder(Gio.File.new_for_path(last_dir))
 
-        resp = dlg.run()
-        if resp == Gtk.ResponseType.OK:
-            filepath = dlg.get_filename()
-            self.config['last_save_dir'] = os.path.dirname(filepath)
-            save_config(self.config)
-            dlg.destroy()
-            self._open_local_file(filepath)
-        else:
-            dlg.destroy()
+        dlg.open(self, None, self._on_open_local_file_response)
+
+    def _on_open_local_file_response(self, dlg, result):
+        try:
+            file = dlg.open_finish(result)
+        except GLib.Error:
+            return  # cancelled, or the picker failed
+        if file is None:
+            return
+        filepath = file.get_path()
+        if not filepath:
+            return
+        self.config['last_save_dir'] = os.path.dirname(filepath)
+        save_config(self.config)
+        self._open_local_file(filepath)
 
     def _open_local_file(self, filepath):
         """Open a local file in an editor tab."""
@@ -671,22 +881,21 @@ class EditorMixin:
     def _update_tab_label(self, tab, new_name):
         """Update the tab label text for a given tab."""
         page_widget = tab.source_view.get_parent()  # ScrolledWindow
-        tab_widget = self.notebook.get_tab_label(page_widget)  # EventBox
+        tab_widget = self.notebook.get_tab_label(page_widget)  # tab_box
         if not tab_widget:
             return
-        # Walk: EventBox -> Box -> find Label
+
+        # Walk the widget tree looking for the Gtk.Label. GTK4 containers
+        # have no get_children() — walk via get_first_child()/get_next_sibling().
         def _find_label(widget):
             if isinstance(widget, Gtk.Label):
                 return widget
-            if hasattr(widget, 'get_children'):
-                for child in widget.get_children():
-                    found = _find_label(child)
-                    if found:
-                        return found
-            if hasattr(widget, 'get_child'):
-                child = widget.get_child()
-                if child:
-                    return _find_label(child)
+            child = widget.get_first_child()
+            while child is not None:
+                found = _find_label(child)
+                if found:
+                    return found
+                child = child.get_next_sibling()
             return None
 
         label = _find_label(tab_widget)
@@ -709,40 +918,51 @@ class EditorMixin:
             self._on_save_upload(None)
 
     def _on_save_local(self, tab):
-        """Save a local file to disk. If untitled, ask where to save first."""
-        # Untitled file — no path yet
+        """Save a local file to disk. If untitled, ask where to save first.
+
+        GTK4: Gtk.FileChooserDialog + .run() -> the native async
+        Gtk.FileDialog (see module docstring); Gtk.FileDialog.save()
+        confirms overwrite itself, replacing the old
+        set_do_overwrite_confirmation(True). The actual disk write (the
+        part of this method that used to run unconditionally after the
+        dialog, whether or not one was shown) is now the shared
+        `_write_local_file` helper so the untitled path can call it from
+        the picker's async response."""
         if not tab.local_path:
-            dlg = Gtk.FileChooserDialog(
-                title="Save As",
-                transient_for=self,
-                action=Gtk.FileChooserAction.SAVE,
-            )
-            dlg.add_buttons(
-                Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                Gtk.STOCK_SAVE, Gtk.ResponseType.OK,
-            )
-            dlg.set_do_overwrite_confirmation(True)
-            dlg.set_current_name(tab.remote_path)  # "Untitled 1" etc.
-            # Remember last save folder
+            dlg = Gtk.FileDialog()
+            dlg.set_title("Save As")
+            dlg.set_initial_name(tab.remote_path)  # "Untitled 1" etc.
             last_dir = self.config.get('last_save_dir', '')
             if last_dir and os.path.isdir(last_dir):
-                dlg.set_current_folder(last_dir)
+                dlg.set_initial_folder(Gio.File.new_for_path(last_dir))
+            dlg.save(self, None,
+                     lambda d, r: self._on_save_local_response(d, r, tab))
+            return
 
-            resp = dlg.run()
-            if resp == Gtk.ResponseType.OK:
-                filepath = dlg.get_filename()
-                # Save the folder for next time
-                self.config['last_save_dir'] = os.path.dirname(filepath)
-                save_config(self.config)
-                dlg.destroy()
-                tab.local_path = filepath
-                tab.remote_path = filepath
-                # Update tab label — walk EventBox > Box > children
-                self._update_tab_label(tab, os.path.basename(filepath))
-            else:
-                dlg.destroy()
-                return
+        self._write_local_file(tab)
 
+    def _on_save_local_response(self, dlg, result, tab):
+        try:
+            file = dlg.save_finish(result)
+        except GLib.Error:
+            return  # cancelled, or the picker failed
+        if file is None:
+            return
+        filepath = file.get_path()
+        if not filepath:
+            return
+        # Save the folder for next time
+        self.config['last_save_dir'] = os.path.dirname(filepath)
+        save_config(self.config)
+        tab.local_path = filepath
+        tab.remote_path = filepath
+        self._update_tab_label(tab, os.path.basename(filepath))
+        self._write_local_file(tab)
+
+    def _write_local_file(self, tab):
+        """Write the buffer's content to tab.local_path. Shared tail of
+        _on_save_local for both the already-has-a-path case and the
+        untitled-file Save As continuation."""
         start = tab.buffer.get_start_iter()
         end = tab.buffer.get_end_iter()
         content = tab.buffer.get_text(start, end, True)
@@ -984,73 +1204,101 @@ class EditorMixin:
                     RESP_CANCEL = 4
 
                     def _ask_overwrite():
-                        dlg = Gtk.Dialog(
+                        """GTK4: a custom-content dialog (icon + text + four
+                        buttons), so per the migration plan's dialog shapes
+                        this is a plain Gtk.Window, not Adw.AlertDialog. This
+                        runs on the main thread while `work()` (a background
+                        thread) blocks on result_q.get() — closing the
+                        window any way other than a button click (Escape,
+                        titlebar, Alt-F4) must still push to the queue or
+                        that thread hangs forever, so both are wired to
+                        Cancel explicitly."""
+                        win = Gtk.Window(
                             title="File Modified on Server",
                             transient_for=self,
                             modal=True,
-                            use_header_bar=False,
                         )
-                        dlg.set_default_size(450, -1)
+                        win.set_default_size(450, -1)
 
-                        box = dlg.get_content_area()
-                        box.set_spacing(8)
+                        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
                         box.set_margin_start(12)
                         box.set_margin_end(12)
                         box.set_margin_top(12)
                         box.set_margin_bottom(12)
+                        win.set_child(box)
 
                         # Warning icon + text
                         msg_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-                        icon = Gtk.Image.new_from_icon_name('dialog-warning-symbolic',
-                                                            Gtk.IconSize.DIALOG)
-                        msg_box.pack_start(icon, False, False, 0)
+                        icon = Gtk.Image.new_from_icon_name('dialog-warning-symbolic')
+                        icon.set_pixel_size(48)
+                        msg_box.append(icon)
 
                         text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
                         title_lbl = Gtk.Label()
                         title_lbl.set_markup("<b>File Modified on Server</b>")
                         title_lbl.set_halign(Gtk.Align.START)
-                        text_box.pack_start(title_lbl, False, False, 0)
+                        text_box.append(title_lbl)
 
                         desc_lbl = Gtk.Label(
                             label=f"'{os.path.basename(tab.remote_path)}' has been "
                                   f"modified on the server since you opened it.")
                         desc_lbl.set_halign(Gtk.Align.START)
-                        desc_lbl.set_line_wrap(True)
-                        text_box.pack_start(desc_lbl, False, False, 0)
-                        msg_box.pack_start(text_box, True, True, 0)
-                        box.pack_start(msg_box, False, False, 0)
+                        desc_lbl.set_wrap(True)
+                        text_box.append(desc_lbl)
+                        msg_box.append(text_box)
+                        box.append(msg_box)
 
-                        box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
-                                       False, False, 4)
+                        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
                         # Buttons
                         btn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
 
+                        resolved = [False]
+
+                        def resolve(choice):
+                            if resolved[0]:
+                                return
+                            resolved[0] = True
+                            result_q.put(choice)
+
+                        def finish(choice):
+                            resolve(choice)
+                            win.close()
+
                         btn_overwrite = Gtk.Button(label="Overwrite server with my changes")
-                        btn_overwrite.connect('clicked',
-                            lambda _: [result_q.put(RESP_OVERWRITE), dlg.destroy()])
-                        btn_box.pack_start(btn_overwrite, False, False, 0)
+                        btn_overwrite.connect('clicked', lambda _b: finish(RESP_OVERWRITE))
+                        btn_box.append(btn_overwrite)
 
                         btn_remote = Gtk.Button(label="Discard my changes, use server version")
-                        btn_remote.connect('clicked',
-                            lambda _: [result_q.put(RESP_USE_REMOTE), dlg.destroy()])
-                        btn_box.pack_start(btn_remote, False, False, 0)
+                        btn_remote.connect('clicked', lambda _b: finish(RESP_USE_REMOTE))
+                        btn_box.append(btn_remote)
 
                         btn_compare = Gtk.Button(label="Compare both versions")
-                        btn_compare.get_style_context().add_class('suggested-action')
-                        btn_compare.connect('clicked',
-                            lambda _: [result_q.put(RESP_COMPARE), dlg.destroy()])
-                        btn_box.pack_start(btn_compare, False, False, 0)
+                        btn_compare.add_css_class('suggested-action')
+                        btn_compare.connect('clicked', lambda _b: finish(RESP_COMPARE))
+                        btn_box.append(btn_compare)
 
                         btn_cancel = Gtk.Button(label="Cancel")
-                        btn_cancel.connect('clicked',
-                            lambda _: [result_q.put(RESP_CANCEL), dlg.destroy()])
-                        btn_box.pack_start(btn_cancel, False, False, 0)
+                        btn_cancel.connect('clicked', lambda _b: finish(RESP_CANCEL))
+                        btn_box.append(btn_cancel)
 
-                        box.pack_start(btn_box, False, False, 0)
-                        dlg.connect('delete-event',
-                            lambda *a: [result_q.put(RESP_CANCEL), True])
-                        dlg.show_all()
+                        box.append(btn_box)
+
+                        def on_key(_ctrl, keyval, _keycode, _state):
+                            if keyval == Gdk.KEY_Escape:
+                                finish(RESP_CANCEL)
+                                return True
+                            return False
+                        key_ctrl = Gtk.EventControllerKey()
+                        key_ctrl.connect('key-pressed', on_key)
+                        win.add_controller(key_ctrl)
+
+                        def on_close_request(_win):
+                            resolve(RESP_CANCEL)
+                            return False
+                        win.connect('close-request', on_close_request)
+
+                        win.present()
 
                     GLib.idle_add(_ask_overwrite)
                     choice = result_q.get()
@@ -1064,8 +1312,16 @@ class EditorMixin:
                         # Replace local content with remote
                         if remote_content:
                             def _load_remote():
+                                # GTK4: TextBuffer.set_text() internally begins
+                                # its own "irreversible action", which now
+                                # conflicts with an already-open user action
+                                # ("Cannot begin irreversible action while in
+                                # user action") — delete+insert achieves the
+                                # same single-undo-step full replace without it.
                                 tab.buffer.begin_user_action()
-                                tab.buffer.set_text(remote_content)
+                                tab.buffer.delete(tab.buffer.get_start_iter(),
+                                                  tab.buffer.get_end_iter())
+                                tab.buffer.insert(tab.buffer.get_start_iter(), remote_content)
                                 tab.buffer.end_user_action()
                                 tab.buffer.set_modified(False)
                                 tab.remote_hash = hashlib.sha256(
@@ -1190,14 +1446,20 @@ class EditorMixin:
             title="Find & Replace" if show_replace else "Find",
             transient_for=self,
             destroy_with_parent=True,
-            type_hint=Gdk.WindowTypeHint.DIALOG,
         )
         win.set_default_size(420, -1)
         win.set_resizable(False)
-        win.set_keep_above(True)
-        win.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
-        win.connect('delete-event', lambda *a: self._on_search_close() or True)
-        win.connect('key-press-event', self._on_search_window_key)
+        # GTK4 removed set_keep_above()/set_position(): window placement and
+        # stacking are the compositor's job now, no direct replacement.
+
+        def on_close_request(_win):
+            self._on_search_close()
+            return True
+        win.connect('close-request', on_close_request)
+
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', self._on_search_window_key)
+        win.add_controller(key_ctrl)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_margin_start(12)
@@ -1207,51 +1469,47 @@ class EditorMixin:
 
         # --- Find row ---
         find_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        find_row.pack_start(Gtk.Label(label="Find:", width_chars=8, halign=Gtk.Align.END),
-                            False, False, 0)
+        find_row.append(Gtk.Label(label="Find:", width_chars=8, halign=Gtk.Align.END))
 
         self._search_entry = Gtk.Entry(hexpand=True)
         self._search_entry.connect('activate', self._on_search_next)
         self._search_entry.connect('changed', self._on_search_changed)
-        find_row.pack_start(self._search_entry, True, True, 0)
+        find_row.append(self._search_entry)
 
         btn_prev = Gtk.Button()
-        btn_prev.set_image(Gtk.Image.new_from_icon_name(
-            'go-up-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
-        btn_prev.set_relief(Gtk.ReliefStyle.NONE)
+        btn_prev.set_icon_name('go-up-symbolic')
+        btn_prev.add_css_class('flat')
         btn_prev.set_tooltip_text("Previous (Shift+Enter)")
         btn_prev.connect('clicked', self._on_search_prev)
-        find_row.pack_start(btn_prev, False, False, 0)
+        find_row.append(btn_prev)
 
         btn_next = Gtk.Button()
-        btn_next.set_image(Gtk.Image.new_from_icon_name(
-            'go-down-symbolic', Gtk.IconSize.SMALL_TOOLBAR))
-        btn_next.set_relief(Gtk.ReliefStyle.NONE)
+        btn_next.set_icon_name('go-down-symbolic')
+        btn_next.add_css_class('flat')
         btn_next.set_tooltip_text("Next (Enter)")
         btn_next.connect('clicked', self._on_search_next)
-        find_row.pack_start(btn_next, False, False, 0)
+        find_row.append(btn_next)
 
-        box.pack_start(find_row, False, False, 0)
+        box.append(find_row)
 
         # --- Replace row ---
         if show_replace:
             replace_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            replace_row.pack_start(
-                Gtk.Label(label="Replace:", width_chars=8, halign=Gtk.Align.END),
-                False, False, 0)
+            replace_row.append(
+                Gtk.Label(label="Replace:", width_chars=8, halign=Gtk.Align.END))
 
             self._replace_entry = Gtk.Entry(hexpand=True)
-            replace_row.pack_start(self._replace_entry, True, True, 0)
+            replace_row.append(self._replace_entry)
 
             btn_replace = Gtk.Button(label="Replace")
             btn_replace.connect('clicked', self._on_replace_one)
-            replace_row.pack_start(btn_replace, False, False, 0)
+            replace_row.append(btn_replace)
 
             btn_replace_all = Gtk.Button(label="All")
             btn_replace_all.connect('clicked', self._on_replace_all)
-            replace_row.pack_start(btn_replace_all, False, False, 0)
+            replace_row.append(btn_replace_all)
 
-            box.pack_start(replace_row, False, False, 0)
+            box.append(replace_row)
 
         # --- Options row ---
         opt_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -1259,18 +1517,20 @@ class EditorMixin:
 
         self._chk_match_case = Gtk.CheckButton(label="Match case")
         self._chk_match_case.connect('toggled', self._on_search_option_changed)
-        opt_row.pack_start(self._chk_match_case, False, False, 0)
+        opt_row.append(self._chk_match_case)
 
         self._chk_regex = Gtk.CheckButton(label="Regex")
         self._chk_regex.connect('toggled', self._on_search_option_changed)
-        opt_row.pack_start(self._chk_regex, False, False, 0)
+        opt_row.append(self._chk_regex)
 
         self._search_match_label = Gtk.Label(label="")
-        opt_row.pack_end(self._search_match_label, False, False, 0)
+        self._search_match_label.set_hexpand(True)
+        self._search_match_label.set_halign(Gtk.Align.END)
+        opt_row.append(self._search_match_label)
 
-        box.pack_start(opt_row, False, False, 0)
+        box.append(opt_row)
 
-        win.add(box)
+        win.set_child(box)
         self._search_window = win
         self._search_show_replace = show_replace
 
@@ -1279,13 +1539,13 @@ class EditorMixin:
         self._search_settings.set_wrap_around(True)
         self._search_context = None
 
-    def _on_search_window_key(self, _win, event):
+    def _on_search_window_key(self, _ctrl, keyval, _keycode, state):
         """Handle keys in the search window."""
-        if event.keyval == Gdk.KEY_Escape:
+        if keyval == Gdk.KEY_Escape:
             self._on_search_close()
             return True
-        shift = event.state & Gdk.ModifierType.SHIFT_MASK
-        if event.keyval == Gdk.KEY_Return and shift:
+        shift = state & Gdk.ModifierType.SHIFT_MASK
+        if keyval == Gdk.KEY_Return and shift:
             self._on_search_prev()
             return True
         return False
@@ -1298,7 +1558,7 @@ class EditorMixin:
             self._search_entry.grab_focus()
         else:
             self._build_search_window(show_replace)
-            self._search_window.show_all()
+            self._search_window.present()
 
         # Pre-fill with selected text
         page_num = self.notebook.get_current_page()
@@ -1470,8 +1730,13 @@ class EditorMixin:
         try:
             parsed = json.loads(text)
             pretty = json.dumps(parsed, indent=4, ensure_ascii=False)
+            # GTK4: set_text() begins its own "irreversible action", which
+            # conflicts with an already-open user action — delete+insert
+            # keeps this a single undo step without it (see _do_upload's
+            # _load_remote for the same fix).
             buf.begin_user_action()
-            buf.set_text(pretty)
+            buf.delete(buf.get_start_iter(), buf.get_end_iter())
+            buf.insert(buf.get_start_iter(), pretty)
             buf.end_user_action()
             self._set_status("JSON formatted")
         except json.JSONDecodeError as e:
@@ -1500,7 +1765,8 @@ class EditorMixin:
                     pretty = '\n'.join(lines[1:])
             pretty = pretty.rstrip() + '\n'
             buf.begin_user_action()
-            buf.set_text(pretty)
+            buf.delete(buf.get_start_iter(), buf.get_end_iter())
+            buf.insert(buf.get_start_iter(), pretty)
             buf.end_user_action()
             self._set_status("XML formatted")
         except Exception as e:
@@ -1509,57 +1775,70 @@ class EditorMixin:
     # -- Go to Line -----------------------------------------------------------
 
     def _on_goto_line(self):
-        """Show a small dialog to jump to a line number."""
+        """Show a small dialog to jump to a line number.
+
+        GTK4: Gtk.Dialog + .run() -> a plain Gtk.Window with explicit
+        Escape handling (this dialog has no Cancel button either, per the
+        migration plan's dialog shapes for custom content — closing it any
+        way just does nothing, same as before)."""
         page_num = self.notebook.get_current_page()
         tab = self.tabs.get(page_num)
         if not tab:
             return
 
-        dlg = Gtk.Dialog(
-            title="Go to Line",
-            transient_for=self,
-            modal=True,
-            use_header_bar=False,
-        )
-        dlg.set_default_size(250, -1)
+        win = Gtk.Window(title="Go to Line", transient_for=self, modal=True)
+        win.set_default_size(250, -1)
 
-        box = dlg.get_content_area()
-        box.set_spacing(8)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
+        win.set_child(box)
 
         total = tab.buffer.get_line_count()
         current = tab.buffer.get_iter_at_mark(
             tab.buffer.get_insert()).get_line() + 1
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        row.pack_start(Gtk.Label(label="Line:"), False, False, 0)
+        row.append(Gtk.Label(label="Line:"))
 
         spin = Gtk.SpinButton.new_with_range(1, total, 1)
         spin.set_value(current)
-        spin.connect('activate', lambda _: dlg.response(Gtk.ResponseType.OK))
-        row.pack_start(spin, True, True, 0)
+        spin.set_hexpand(True)
+        row.append(spin)
 
-        row.pack_start(Gtk.Label(label=f"/ {total}"), False, False, 0)
+        row.append(Gtk.Label(label=f"/ {total}"))
+
+        def go(*_a):
+            line = int(spin.get_value()) - 1
+            ok, target = tab.buffer.get_iter_at_line(line)
+            if ok:
+                tab.buffer.place_cursor(target)
+                tab.source_view.scroll_to_iter(target, 0.1, True, 0.0, 0.5)
+                tab.source_view.grab_focus()
+            win.close()
+
+        spin.connect('activate', go)
 
         btn_go = Gtk.Button(label="Go")
-        btn_go.get_style_context().add_class('suggested-action')
-        btn_go.connect('clicked', lambda _: dlg.response(Gtk.ResponseType.OK))
-        row.pack_start(btn_go, False, False, 0)
+        btn_go.add_css_class('suggested-action')
+        btn_go.connect('clicked', go)
+        row.append(btn_go)
 
-        box.pack_start(row, False, False, 0)
-        dlg.show_all()
+        box.append(row)
 
-        resp = dlg.run()
-        if resp == Gtk.ResponseType.OK:
-            line = int(spin.get_value()) - 1
-            target = tab.buffer.get_iter_at_line(line)
-            tab.buffer.place_cursor(target)
-            tab.source_view.scroll_to_iter(target, 0.1, True, 0.0, 0.5)
-            tab.source_view.grab_focus()
-        dlg.destroy()
+        # A bare Gtk.Window has no built-in Escape-to-close behavior.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                win.close()
+                return True
+            return False
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        win.add_controller(key_ctrl)
+
+        win.present()
 
     # -- Docblock Generation ---------------------------------------------------
 
@@ -1569,7 +1848,7 @@ class EditorMixin:
         cursor = buf.get_iter_at_mark(buf.get_insert())
         line_num = cursor.get_line()
 
-        line_start = buf.get_iter_at_line(line_num)
+        _, line_start = buf.get_iter_at_line(line_num)
         line_end = line_start.copy()
         if not line_end.ends_line():
             line_end.forward_to_line_end()
@@ -1599,7 +1878,7 @@ class EditorMixin:
         line_num = cursor.get_line()
 
         # Get the current line text
-        line_start = buf.get_iter_at_line(line_num)
+        _, line_start = buf.get_iter_at_line(line_num)
         line_end = line_start.copy()
         if not line_end.ends_line():
             line_end.forward_to_line_end()
@@ -1626,7 +1905,7 @@ class EditorMixin:
         total_lines = buf.get_line_count()
         func_line = None
         for i in range(line_num + 1, min(line_num + 5, total_lines)):
-            next_start = buf.get_iter_at_line(i)
+            _, next_start = buf.get_iter_at_line(i)
             next_end = next_start.copy()
             if not next_end.ends_line():
                 next_end.forward_to_line_end()
@@ -1763,50 +2042,60 @@ class EditorMixin:
 
         return '\n'.join(lines)
 
-    def _on_editor_populate_popup(self, _view, popup):
-        """Add 'Ask Claude' submenu to the editor's right-click context menu."""
-        from claude_tab import PRESETS
-        if not isinstance(popup, Gtk.Menu):
-            return
-        popup.append(Gtk.SeparatorMenuItem())
-        ask_item = Gtk.MenuItem(label="Ask Claude")
-        submenu = Gtk.Menu()
-        for key, label, _prompt in PRESETS:
-            sub_item = Gtk.MenuItem(label=label)
-            sub_item.connect(
-                'activate',
-                lambda _w, k=key: self._claude_handle_trigger(k))
-            submenu.append(sub_item)
-        ask_item.set_submenu(submenu)
-        popup.append(ask_item)
-        popup.show_all()
+    def _setup_editor_context_menu(self, view):
+        """Add an 'Ask Claude' submenu to the editor's right-click context menu.
 
-    def _on_editor_key_press(self, _view, event):
-        """Intercept keys on the source view before GtkSourceView handles them."""
+        GTK4 removed GtkTextView's 'populate-popup' signal entirely
+        (GtkSource.View inherits from GtkTextView) — context-menu
+        customization is now declarative via
+        Gtk.TextView.set_extra_menu(Gio.Menu), which GTK merges into the
+        view's built-in cut/copy/paste popup as its own trailing section
+        every time it's shown. Built once per view here (the presets are
+        static), instead of being rebuilt on every popup like the old
+        populate-popup handler."""
+        from claude_tab import PRESETS
+        menu = Gio.Menu()
+        group = Gio.SimpleActionGroup()
+        submenu = Gio.Menu()
+        for key, label, _prompt in PRESETS:
+            action_name = f'ask_{key}'
+            action = Gio.SimpleAction.new(action_name, None)
+            action.connect('activate', lambda _a, _p, k=key: self._claude_handle_trigger(k))
+            group.add_action(action)
+            submenu.append(label, f'editorctx.{action_name}')
+        menu.append_submenu("Ask Claude", submenu)
+        view.insert_action_group('editorctx', group)
+        view.set_extra_menu(menu)
+
+    def _on_editor_key_press(self, ctrl, keyval, keycode, state):
+        """Intercept keys on the source view before GtkSourceView/GtkText's
+        own key handling (see the CAPTURE-phase controller set up in
+        _create_editor_tab)."""
+        view = ctrl.get_widget()
         # Tab on /// or /** line → expand snippet
-        if event.keyval == Gdk.KEY_Tab:
+        if keyval == Gdk.KEY_Tab:
             # Hide completion popup first so it doesn't consume the Tab
-            completion = _view.get_completion()
+            completion = view.get_completion()
             completion.hide()
-            if self._try_expand_snippet(_view):
+            if self._try_expand_snippet(view):
                 return True
-        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
-        if ctrl and event.keyval == Gdk.KEY_f:
+        control = state & Gdk.ModifierType.CONTROL_MASK
+        if control and keyval == Gdk.KEY_f:
             self._show_search(show_replace=False)
             return True
-        if ctrl and event.keyval == Gdk.KEY_r:
+        if control and keyval == Gdk.KEY_r:
             self._show_search(show_replace=True)
             return True
-        if ctrl and event.keyval == Gdk.KEY_g:
+        if control and keyval == Gdk.KEY_g:
             self._on_goto_line()
             return True
-        if ctrl and event.keyval == Gdk.KEY_n:
+        if control and keyval == Gdk.KEY_n:
             self._on_new_local_file()
             return True
-        if ctrl and event.keyval == Gdk.KEY_o:
+        if control and keyval == Gdk.KEY_o:
             self._on_open_local_file()
             return True
-        if ctrl and event.keyval == Gdk.KEY_s:
+        if control and keyval == Gdk.KEY_s:
             self._on_save(None)
             return True
         return False
