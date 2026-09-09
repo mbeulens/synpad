@@ -253,6 +253,28 @@ class EditorMixin:
                       f"{[p.get_title() for p in providers]}; "
                       f"seed words={nwords}", file=_sys.stderr, flush=True)
 
+                def _popup_state():
+                    """What the completion popup actually is, right now."""
+                    rows = 0; measures = []
+                    try:
+                        for top in Gtk.Window.get_toplevels():
+                            def walk(w):
+                                nonlocal rows
+                                n = type(w).__name__
+                                if 'CompletionListBoxRow' in n:
+                                    rows += 1
+                                elif 'GtkSourceCompletionList' == n:
+                                    m = w.measure(Gtk.Orientation.HORIZONTAL, -1)
+                                    measures.append((w.get_visible(), m.minimum,
+                                                     m.natural, w.get_width()))
+                                c = w.get_first_child()
+                                while c:
+                                    walk(c); c = c.get_next_sibling()
+                            walk(top)
+                    except Exception as e:
+                        return f"<err {e}>"
+                    return f"rows={rows} list(visible,min,nat,width)={measures}"
+
                 def _watch(*_a):
                     ok, start, end = (True, None, None)
                     try:
@@ -262,11 +284,9 @@ class EditorMixin:
                         typed = b.get_text(line_start, ins, False)
                     except Exception as e:
                         typed = f"<err {e}>"
-                    print(f"[completion] buffer changed, current line prefix="
-                          f"{typed[-24:]!r} providers still attached="
-                          f"{len(getattr(view, '_completion_providers', []))} "
-                          f"keepalive={bool(getattr(view, '_completion_keepalive', None))}",
-                          file=_sys.stderr, flush=True)
+                    print(f"[completion] prefix={typed[-20:]!r} "
+                          f"providers={len(getattr(view, '_completion_providers', []))} "
+                          f"{_popup_state()}", file=_sys.stderr, flush=True)
                 view.get_buffer().connect('changed', _watch)
             # CompletionWords does not own the buffers it scans, so the seeded
             # language buffer must outlive this function or its words vanish.
