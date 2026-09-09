@@ -784,6 +784,9 @@ try:
     check("Delete file with confirmation calls ftp_mgr.rmfile",
           h3.rmfile_calls == ['/remote/x.txt'], h3.rmfile_calls)
 
+    h3.confirm_return = False
+    h3._on_tree_delete_dir('/remote/d', None)
+    check("Delete directory without confirmation is a no-op", h3.rmdir_calls == [])
     h3.confirm_return = True
     h3._on_tree_delete_dir('/remote/d', None)
     check("Delete directory with confirmation calls ftp_mgr.rmdir",

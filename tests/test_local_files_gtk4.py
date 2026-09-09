@@ -4,8 +4,20 @@ Guards the Gtk.Menu -> Gio.Menu/Gtk.PopoverMenu migration (every item and
 label preserved), the button-press-event -> Gtk.GestureClick migration for
 right-click, and the permissions dialog's .run() -> Gtk.Window + explicit
 buttons restructuring.
+
+Also guards (fix-round-2 addition) the real bodies of `_on_local_new_file`/
+`_on_local_new_dir`/`_on_local_rename`/`_on_local_delete` against a real
+temp directory. The `Host` class below overrides all four of these
+directly (to test only the context-menu wiring that reaches them), so its
+40 checks execute zero lines of any of the four methods themselves — this
+was proven empirically with a line-level `sys.settrace` scoped to
+local_files.py, and is why a second host class, `Host2`, exists further
+down: it does NOT override the four handlers, and instead stubs
+`_ask_name`/`_confirm_delete` (the async, callback-based dialogs these
+four now call into, per remote.py's fix-round-1 rework) to drive their
+real bodies end to end.
 """
-import os, sys
+import os, sys, tempfile, shutil
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import gi
 gi.require_version('Gtk', '4.0')
@@ -38,8 +50,17 @@ class Host(LocalFilesMixin, Gtk.Window):
     def _set_status(self, m): self.status.append(m)
     def _show_error(self, title, msg): self.errors.append((title, msg))
     def _icon_for_file(self, name): return 'text-x-generic'
-    def _ask_name(self, *a, **kw): return None
-    def _confirm_delete(self, what): return True
+    def _ask_name(self, title, prompt, callback, default_value='', ok_label='Create'):
+        # Fix-round-2 note: _ask_name/_confirm_delete are async/callback-
+        # based (see remote.py), not synchronous-returning. This Host
+        # overrides all four handlers that would call these below, so
+        # they're never actually invoked here — but keeping the real
+        # signature (and actually calling back) avoids a stale stub that
+        # would TypeError the moment it *is* invoked, and matches Host2's
+        # (below) real exercise of those four handlers' bodies.
+        callback(None)
+    def _confirm_delete(self, what, callback):
+        callback(True)
     def _git_show_history_local(self, target): self.calls.append(('git_history', target))
     def _on_local_new_file(self, parent_dir, parent_iter):
         self.calls.append(('new_file', parent_dir, parent_iter))
@@ -355,6 +376,174 @@ check("Escape does not call chmod", chmod_calls == [], chmod_calls)
 check("Escape reports no status change", h.status == [], h.status)
 check("Escape closes the window (was RESPONSE_DELETE_EVENT)",
       win4.get_visible() is False, win4.get_visible())
+
+
+# =====================================================================
+# _on_local_new_file / _on_local_new_dir / _on_local_rename /
+# _on_local_delete — REAL bodies, against a real temp directory.
+#
+# Host (above) overrides all four of these directly, so none of their
+# lines are ever executed by the checks above. Host2 does not override
+# them: it stubs only _ask_name/_confirm_delete (with their real,
+# callback-based signature — see remote.py's fix-round-1 rework) and lets
+# the real method bodies run, asserting on real filesystem effects.
+# =====================================================================
+
+class Host2(LocalFilesMixin, Gtk.Window):
+    """Exercises the real _on_local_* bodies. _load_local_tree and
+    _on_local_refresh are stubbed as spies (not exercised here — they're
+    tree-view refresh plumbing, not part of what this task changed) so
+    these tests stay scoped to the create/rename/delete logic itself."""
+    def __init__(self):
+        Gtk.Window.__init__(self)
+        self.config = {}
+        self.tabs = {}
+        self.status = []
+        self.errors = []
+        self._local_store = Gtk.TreeStore(str, str, str, bool, bool)
+        self.ask_name_return = None
+        self.confirm_return = True
+        self.refresh_calls = []
+        self.load_tree_calls = []
+        self.close_tab_calls = []
+        self.update_tab_label_calls = []
+
+    def _set_status(self, m): self.status.append(m)
+    def _show_error(self, title, msg): self.errors.append((title, msg))
+    def _icon_for_file(self, name): return 'text-x-generic'
+    def _ask_name(self, title, prompt, callback, default_value='', ok_label='Create'):
+        callback(self.ask_name_return)
+    def _confirm_delete(self, what, callback):
+        callback(self.confirm_return)
+    def _load_local_tree(self, path, parent_iter=None):
+        self.load_tree_calls.append((path, parent_iter))
+    def _on_local_refresh(self, _btn):
+        self.refresh_calls.append(True)
+    def _close_tab(self, page_num):
+        self.close_tab_calls.append(page_num)
+    def _update_tab_label(self, tab, name):
+        self.update_tab_label_calls.append((tab, name))
+
+
+tmp = tempfile.mkdtemp()
+try:
+    # --- _on_local_new_file: None -> no-op; a name -> real file created ---
+    h2 = Host2()
+    h2.ask_name_return = None
+    h2._on_local_new_file(tmp, None)
+    check("New File with no name creates nothing", os.listdir(tmp) == [], os.listdir(tmp))
+    check("New File with no name sets no status", h2.status == [], h2.status)
+
+    h2.ask_name_return = 'hello.txt'
+    h2._on_local_new_file(tmp, None)
+    check("New File actually creates the file on disk",
+          os.path.isfile(os.path.join(tmp, 'hello.txt')))
+    check("New File sets status", h2.status and 'Created' in h2.status[-1], h2.status)
+    check("New File with no parent_iter refreshes via _on_local_refresh",
+          h2.refresh_calls == [True], h2.refresh_calls)
+
+    # With a parent_iter: marks it not-loaded and reloads that node instead.
+    h2.status.clear()
+    d_iter = h2._local_store.append(None, ['sub', 'folder', tmp, True, True])
+    h2.ask_name_return = 'world.txt'
+    h2._on_local_new_file(tmp, d_iter)
+    check("New File (with parent_iter) creates the file on disk",
+          os.path.isfile(os.path.join(tmp, 'world.txt')))
+    check("New File (with parent_iter) marks the row not-loaded and reloads it",
+          h2._local_store[d_iter][4] is False and h2.load_tree_calls == [(tmp, d_iter)],
+          (h2._local_store[d_iter][4], h2.load_tree_calls))
+
+    # --- _on_local_new_dir: None -> no-op; a name -> real directory created ---
+    # (tmp already holds hello.txt/world.txt from the New File checks above
+    # — snapshot rather than assume an empty directory.)
+    h2 = Host2()
+    before_listing = sorted(os.listdir(tmp))
+    h2.ask_name_return = None
+    h2._on_local_new_dir(tmp, None)
+    check("New Directory with no name creates nothing",
+          sorted(os.listdir(tmp)) == before_listing, os.listdir(tmp))
+
+    h2.ask_name_return = 'newdir'
+    h2._on_local_new_dir(tmp, None)
+    check("New Directory actually creates the directory on disk",
+          os.path.isdir(os.path.join(tmp, 'newdir')))
+    check("New Directory sets status", h2.status and 'Created' in h2.status[-1], h2.status)
+    check("New Directory with no parent_iter refreshes via _on_local_refresh",
+          h2.refresh_calls == [True], h2.refresh_calls)
+
+    # --- _on_local_rename: same name -> no-op; new name -> real rename ---
+    h2 = Host2()
+    old_path = os.path.join(tmp, 'old.txt')
+    with open(old_path, 'w') as f:
+        f.write('content')
+    f_iter = h2._local_store.append(None, ['old.txt', 'text-x-generic', old_path, False, False])
+    tab = type('Tab', (), {'is_local': True, 'local_path': old_path, 'remote_path': old_path})()
+    h2.tabs = {0: tab}
+
+    h2.ask_name_return = 'old.txt'  # unchanged name -> short-circuit
+    h2._on_local_rename(old_path, 'old.txt', f_iter)
+    check("Rename to the same name leaves the file in place",
+          os.path.exists(old_path), old_path)
+    check("Rename to the same name does not touch the store entry",
+          h2._local_store[f_iter][0] == 'old.txt' and h2._local_store[f_iter][2] == old_path)
+    check("Rename to the same name does not touch the open tab",
+          tab.local_path == old_path and h2.update_tab_label_calls == [],
+          h2.update_tab_label_calls)
+    check("Rename to the same name sets no status", h2.status == [], h2.status)
+
+    h2.ask_name_return = 'new.txt'
+    h2._on_local_rename(old_path, 'old.txt', f_iter)
+    new_path = os.path.join(tmp, 'new.txt')
+    check("Rename actually renames the file on disk",
+          os.path.exists(new_path) and not os.path.exists(old_path))
+    check("Rename updates the store entry's name and path",
+          h2._local_store[f_iter][0] == 'new.txt' and h2._local_store[f_iter][2] == new_path,
+          (h2._local_store[f_iter][0], h2._local_store[f_iter][2]))
+    check("Rename updates the matching open tab's paths",
+          tab.local_path == new_path and tab.remote_path == new_path,
+          (tab.local_path, tab.remote_path))
+    check("Rename updates the tab label", h2.update_tab_label_calls == [(tab, 'new.txt')],
+          h2.update_tab_label_calls)
+    check("Rename sets status", h2.status and 'Renamed to' in h2.status[-1], h2.status)
+
+    # --- _on_local_delete: not confirmed -> no-op; confirmed -> real delete ---
+    h2 = Host2()
+    del_file = os.path.join(tmp, 'delete_me.txt')
+    with open(del_file, 'w') as f:
+        f.write('x')
+    df_iter = h2._local_store.append(None, ['delete_me.txt', 'text-x-generic', del_file, False, False])
+    del_tab = type('Tab', (), {'is_local': True, 'local_path': del_file})()
+    h2.tabs = {7: del_tab}
+
+    h2.confirm_return = False
+    h2._on_local_delete(del_file, 'delete_me.txt', df_iter, is_dir=False)
+    check("Delete without confirmation leaves the file on disk", os.path.exists(del_file))
+    check("Delete without confirmation sets no status", h2.status == [], h2.status)
+    check("Delete without confirmation does not close any tab",
+          h2.close_tab_calls == [], h2.close_tab_calls)
+
+    h2.confirm_return = True
+    h2._on_local_delete(del_file, 'delete_me.txt', df_iter, is_dir=False)
+    check("Delete with confirmation actually removes the file from disk",
+          not os.path.exists(del_file))
+    check("Delete with confirmation sets status", h2.status and 'Deleted' in h2.status[-1], h2.status)
+    check("Delete with confirmation closes the matching open tab",
+          h2.close_tab_calls == [7], h2.close_tab_calls)
+
+    # Directory delete: is_dir=True -> shutil.rmtree, not os.unlink.
+    h2 = Host2()
+    del_dir = os.path.join(tmp, 'delete_dir')
+    os.makedirs(del_dir)
+    with open(os.path.join(del_dir, 'inner.txt'), 'w') as f:
+        f.write('x')
+    dd_iter = h2._local_store.append(None, ['delete_dir', 'folder', del_dir, True, True])
+    h2.confirm_return = True
+    h2._on_local_delete(del_dir, 'delete_dir', dd_iter, is_dir=True)
+    check("Delete directory with confirmation removes it recursively",
+          not os.path.exists(del_dir))
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
 
 print()
 if fails: print(f"{len(fails)} FAILED: {fails}"); sys.exit(1)
