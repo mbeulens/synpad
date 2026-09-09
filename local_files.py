@@ -196,8 +196,17 @@ class LocalFilesMixin:
         if not path_info:
             return False
         tree_path = path_info[0]
-        # No expander-zone skip: GTK's own arrow handling is inert here, so we
-        # own the whole row including the arrow.
+        # Leave the expander arrow to GTK. Once the press actually reaches the
+        # tree (see the 12px margin clearing Gtk.Paned's grab area), GTK's own
+        # expander toggles on button RELEASE. We toggle on press, so handling
+        # the arrow too would open on mousedown and close again on mouseup.
+        # The arrow sits left of the cell area; that strip is GTK's.
+        try:
+            cell = view.get_cell_area(tree_path, path_info[1])
+        except Exception:
+            cell = None
+        if cell is not None and int(vx) < cell.x:
+            return False
         try:
             tree_iter = self._local_store.get_iter(tree_path)
         except ValueError:

@@ -102,11 +102,18 @@ cx, cy = area.x + 20, area.y + area.height // 2
 bg = view.get_background_area(dpath, view.get_column(0))
 arrow_x = bg.x + max(0, (area.x - bg.x) // 2)
 check("arrow zone exists left of the cell area", area.x > bg.x, (bg.x, area.x))
+# GTK's expander owns the arrow and toggles on RELEASE; we toggle on press.
+# If we also handled the arrow the row would open on mousedown and close on
+# mouseup -- the v2.0.15 symptom. So an arrow press must be a no-op for us.
 was = view.row_expanded(dpath)
 h._on_tree_single_click(FakeGesture(view), 1, arrow_x, cy)
-check("click in the ARROW zone now toggles (GTK's own arrow is inert)",
+check("ARROW press is a no-op for us (GTK toggles it on release)",
+      view.row_expanded(dpath) == was)
+# ...and the name, one pixel right of the cell edge, must still toggle.
+h._on_tree_single_click(FakeGesture(view), 1, area.x + 1, cy)
+check("press just inside the cell area DOES toggle",
       view.row_expanded(dpath) != was)
-h._on_tree_single_click(FakeGesture(view), 1, arrow_x, cy)  # back to start
+h._on_tree_single_click(FakeGesture(view), 1, area.x + 1, cy)  # restore
 
 check("directory starts collapsed", not view.row_expanded(dpath))
 h._on_tree_single_click(FakeGesture(view), 1, cx, cy)
