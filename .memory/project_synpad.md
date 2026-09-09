@@ -1,21 +1,47 @@
 ---
 name: SynPad project
-description: GTK3 Python code editor with FTP/SFTP support - active development project on GitHub
+description: Python code editor with FTP/SFTP - GTK3 on dev/main, GTK4+libadwaita port on the gtk4 branch under daily trial
 type: project
 originSessionId: 755c183c-86ca-4b4e-b566-7d088fcb2c9d
 ---
 SynPad is a lightweight code editor (mini IDE) built in Python with GTK3 + GtkSourceView.
 
-**Location:** `~/Development/Local/Synpad/repo/` (git repo, working dir on `dev` branch)
+**Location:** `~/Development/Local/Synpad/repo/` (git repo, `dev` branch — GTK3, stable)
+**GTK4 port:** `~/Development/Local/Synpad/repo-gtk4/` (git worktree, `gtk4` branch)
 - GitHub: https://github.com/mbeulens/synpad
 - Archive of old version folders: `~/Development/Local/Synpad/archive/`
-- Desktop launcher: `~/.local/share/applications/synpad.desktop` (points to repo)
+- Desktop launchers: `synpad.desktop` (green icon, v1/GTK3/XWayland, `StartupWMClass=synpad`)
+  and `synpad-2.0.desktop` (blue icon, v2/GTK4/native Wayland,
+  `StartupWMClass=com.mbeulens.synpad`). Both go via `~/.local/bin/synpad`
+  and `~/.local/bin/synpad-2.0` so a branch checkout cannot repoint them.
+  Diagnostics: `~/.local/bin/synpad-2.0-debug` (crash + completion logging to
+  /tmp/synpad2-crash.log) and `synpad-2.0-x11` (XWayland comparison run).
 - Config: `~/.config/synpad/config.json`
 - Session: `~/.config/synpad/session.json`
 - Custom icon: `synpad.svg` in repo (green gradient notepad + yellow pencil)
 
 **Current version:** v1.16.1 on dev (v1.18.0 tag exists on main from memory-only releases — running code is v1.16.1)
 **Branch:** Always work on `dev`, merge to `main` for releases
+
+**SynPad 2.0 — GTK4 + libadwaita port (branch `gtk4`, 42 commits, NOT merged).**
+Started 2026-09-09. All 13 modules on GTK4/GtkSourceView 5/Vte 3.91/libadwaita,
+17 test files passing. Plan and findings: `docs/superpowers/plans/gtk4-migration.md`
+and `MIGRATION-GTK4.md` in the worktree.
+- **Why:** GTK3 could not satisfy both known bugs at once. Ubuntu ships no
+  GdkWayland-3.0 typelib, so GTK3 Python cannot apply xdg-activation tokens —
+  hence the `GDK_BACKEND=x11` pin, which put Mutter's XWayland clipboard bridge
+  in the paste path and was the prime suspect for the intermittent Chrome-paste
+  hang. GTK4 handles activation internally; the pin and the GdkX11 hack are gone.
+- **Status as of 2026-09-09 23:30:** user is running v2 daily for a few days
+  before deciding on merge. Unproven: whether the Chrome-paste hang is actually
+  fixed. Smoke-test list is in MIGRATION-GTK4.md.
+- **Known accepted regression:** the completion list shows bare names, not
+  `name (signature)`. GtkSourceView 5's completion provider cannot be
+  implemented from PyGObject — a minimal do-nothing provider segfaults (six
+  variants tested). Signature help still shows signatures.
+- **v1.20.4's tab workarounds are deleted:** Adw.TabView keys tabs by TabPage
+  object, so `_reindex_tabs()` and the page-reordered handler are gone; the
+  stale-page_num bug class is structurally impossible.
 
 **Architecture (v1.16.0):** Modular — split from monolith into 13 files:
 - synpad.py (entry point), config.py, tab.py, symbols.py, completion.py
