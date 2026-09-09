@@ -320,6 +320,13 @@ if win is not None:
                     if isinstance(c, Gtk.GestureClick)]
         check("colored minimap box has a click gesture", len(gestures) >= 1)
         if gestures:
+            # MINOR 4 (final review): a bare Gtk.GestureClick defaults to
+            # button 1 only. The old GTK3 handler had no button guard at
+            # all (any button scrolled the minimap), so set_button(0) is
+            # required to match — without it, a middle/right click would
+            # silently do nothing.
+            check("minimap gesture is configured for any button (set_button(0))",
+                  gestures[0].get_button() == 0, gestures[0].get_button())
             try:
                 gestures[0].emit('pressed', 1, 5.0, 1.0)
                 click_ok = True

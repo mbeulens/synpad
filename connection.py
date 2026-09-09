@@ -465,6 +465,7 @@ class ConnectDialog(Gtk.Window):
         self._loading_server = False  # prevent save-trigger during load
         self._response_callback = None
         self._response_user_data = ()
+        self._responded = False  # guards close-request re-entry from _respond()'s own self.close()
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         outer.set_margin_start(12)
@@ -669,6 +670,21 @@ class ConnectDialog(Gtk.Window):
         key_ctrl.connect('key-pressed', on_key)
         self.add_controller(key_ctrl)
 
+        # Closing via the titlebar's own close control, Alt-F4, or the
+        # transient parent being destroyed all raise 'close-request'
+        # without going through Connect/Cancel/Escape — a bare Gtk.Window
+        # has no other hook for this, so choose()'s callback was
+        # previously stranded on this path entirely (never invoked at
+        # all — not even with 'cancel'). Route it to the same cancel path
+        # Cancel takes, and let the default handling actually tear the
+        # window down (return False) rather than calling self.close()
+        # ourselves from inside its own close-request handling.
+        def on_close_request(_win):
+            self._respond('cancel')
+            return False
+
+        self.connect('close-request', on_close_request)
+
     def choose(self, callback, *user_data):
         """Async replacement for the old `resp = dlg.run()` pattern.
 
@@ -688,6 +704,14 @@ class ConnectDialog(Gtk.Window):
         self.present()
 
     def _respond(self, response):
+        # Guards against being invoked twice for one dialog — e.g. the
+        # self.close() below raises 'close-request', whose handler also
+        # calls _respond('cancel'); without this guard self.close() would
+        # recurse into 'close-request' indefinitely instead of bottoming
+        # out.
+        if self._responded:
+            return
+        self._responded = True
         cb = self._response_callback
         user_data = self._response_user_data
         self._response_callback = None

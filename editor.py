@@ -409,17 +409,20 @@ class EditorMixin:
 
         def resolve(do_close):
             # Guards against being invoked twice — a button click calls
-            # finish_and_close_window() which both resolves and win.close()s,
-            # and that close() itself raises 'close-request', whose handler
-            # also calls resolve().
+            # finish_and_close_window(), which calls resolve(); win.close()
+            # below itself raises 'close-request', whose handler also
+            # calls resolve(). The window is closed before finish() runs
+            # (not after) so a raising continuation — finish() ends by
+            # calling the caller's chained callback — can't strand this
+            # modal=True window open.
             if resolved[0]:
                 return
             resolved[0] = True
+            win.close()
             finish(do_close)
 
         def finish_and_close_window(do_close):
             resolve(do_close)
-            win.close()
 
         # ButtonsType.YES_NO rendered as [No, Yes] left-to-right in GTK3.
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)

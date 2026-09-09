@@ -17,7 +17,8 @@ import os
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('GtkSource', '5')
-from gi.repository import Gtk, GtkSource, Gdk, GLib
+gi.require_version('Adw', '1')
+from gi.repository import Gtk, GtkSource, Gdk, GLib, Adw
 
 from config import save_config, CONFIG_DIR
 from connection import ConnectDialog
@@ -206,12 +207,20 @@ class DialogsMixin:
                 tab.buffer.set_style_scheme(scheme)
 
     def _apply_gtk_theme(self):
-        """Set the GTK application-wide dark/light preference."""
-        settings = Gtk.Settings.get_default()
-        settings.set_property(
-            'gtk-application-prefer-dark-theme',
-            self.config.get('dark_theme', True),
-        )
+        """Set the application-wide dark/light preference.
+
+        GTK4/libadwaita: GtkSettings:gtk-application-prefer-dark-theme is
+        explicitly ignored by libadwaita — verified empirically: setting it
+        True or False either way leaves Adw.StyleManager.get_dark() stuck
+        at False, while Adw.StyleManager.set_color_scheme() actually flips
+        it (and this is also why every launch logged an Adwaita-WARNING).
+        The dark/light decision logic itself (self.config['dark_theme'])
+        is unchanged; only the API used to apply it changes."""
+        style_manager = Adw.StyleManager.get_default()
+        if self.config.get('dark_theme', True):
+            style_manager.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+        else:
+            style_manager.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
 
     def _on_pick_scheme(self, _item):
         """Dialog to pick a GtkSourceView color scheme."""
@@ -272,10 +281,22 @@ class DialogsMixin:
         scroll.set_child(tv)
         box.append(scroll)
 
+        resolved = [False]
+
         def on_response(accepted):
             """.run()'s blocking return value becomes this button-click
             callback; the decision logic (apply on OK, revert the live
-            preview otherwise — Cancel or Escape) is unchanged."""
+            preview otherwise — Cancel, Escape, or closing the window via
+            its titlebar/Alt-F4) is unchanged. Under GTK3, dlg.run()
+            returned RESPONSE_DELETE_EVENT for a titlebar close and the
+            revert branch ran; a bare Gtk.Window has no equivalent
+            built-in behavior, so close-request is wired below to this
+            same path. The `resolved` guard makes this safe to call twice
+            for one dialog — e.g. win.close() below raises 'close-request',
+            whose handler also calls on_response()."""
+            if resolved[0]:
+                return
+            resolved[0] = True
             if accepted:
                 model, it = tv.get_selection().get_selected()
                 if it:
@@ -318,6 +339,19 @@ class DialogsMixin:
         key_ctrl = Gtk.EventControllerKey()
         key_ctrl.connect('key-pressed', on_key)
         win.add_controller(key_ctrl)
+
+        # Closing via the titlebar's own close control, Alt-F4, or the
+        # transient parent being destroyed all raise 'close-request'
+        # without going through Cancel/OK/Escape — a bare Gtk.Window has
+        # no other hook for this. Route it to the same revert path Cancel
+        # takes, and let the default handling actually tear the window
+        # down (return False) rather than calling win.close() ourselves
+        # from inside its own close-request handling.
+        def on_close_request(_win):
+            on_response(False)
+            return False
+
+        win.connect('close-request', on_close_request)
 
         win.present()
 

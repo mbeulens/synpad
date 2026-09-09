@@ -10,7 +10,7 @@ this file checks the decision logic survived unchanged and that Escape is
 explicitly wired to the same cancel path as the Cancel button (a bare
 Gtk.Window has no built-in Escape-closes behavior, unlike Gtk.Dialog).
 """
-import os, sys
+import os, sys, contextlib
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import gi
 gi.require_version('Gtk', '4.0')
@@ -36,6 +36,42 @@ fails = []
 def check(n, c, extra=""):
     print(f"{'PASS' if c else 'FAIL'}: {n}" + (f" — {extra}" if not c and extra else ""))
     if not c: fails.append(n)
+
+
+@contextlib.contextmanager
+def capture_c_stderr():
+    """Capture C-level stderr (fd 2) written during the block (same
+    technique as test_editor_gtk4.py's helper of the same name). GLib's
+    default log handler — what prints "Adwaita-WARNING **: ..." — writes
+    straight to the process's stderr file descriptor via fprintf(),
+    bypassing Python's sys.stderr object entirely, so only fd-level
+    redirection catches it. Yields a dict; after the block,
+    result['output'] holds whatever was written to fd 2."""
+    sys.stderr.flush()
+    stderr_fd = sys.stderr.fileno()
+    saved_fd = os.dup(stderr_fd)
+    read_fd, write_fd = os.pipe()
+    os.dup2(write_fd, stderr_fd)
+    os.close(write_fd)
+    result = {'output': ''}
+    try:
+        yield result
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved_fd, stderr_fd)
+        os.close(saved_fd)
+        os.set_blocking(read_fd, False)
+        chunks = []
+        try:
+            while True:
+                chunk = os.read(read_fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except BlockingIOError:
+            pass
+        os.close(read_fd)
+        result['output'] = b''.join(chunks).decode('utf-8', errors='replace')
 
 
 class Host(DialogsMixin, Gtk.Window):
@@ -307,6 +343,35 @@ check("Escape does not change config['color_scheme']",
 check("Escape still reverts the live preview", h.apply_calls == 1, h.apply_calls)
 check("Escape closes the window", win3.get_visible() is False)
 
+# Closing via the titlebar/Alt-F4/destroyed-transient-parent path
+# (IMPORTANT 2, final review): a bare Gtk.Window's 'close-request' fires
+# on win.close() without going through Cancel/OK/Escape at all. Under
+# GTK3, dlg.run() returned RESPONSE_DELETE_EVENT here and the revert
+# branch ran; before this fix a bare Gtk.Window had no close-request
+# handler at all, so the live preview stayed applied while
+# config['color_scheme'] kept the old value — a real drift between
+# on-screen buffers and saved config.
+h.config['color_scheme'] = 'oblivion'
+win5 = capture_window(lambda: h._on_pick_scheme(None))
+tv5 = find_all(win5, Gtk.TreeView)[0]
+model5 = tv5.get_model()
+scheme_ids5 = [row[0] for row in model5]
+other5 = next(s for s in scheme_ids5 if s != 'oblivion')
+for row in model5:
+    if row[0] == other5:
+        tv5.get_selection().select_iter(row.iter)
+        break
+h.apply_calls = 0
+win5.close()
+check("titlebar close does not change config['color_scheme']",
+      h.config['color_scheme'] == 'oblivion', h.config['color_scheme'])
+check("titlebar close reverts the live preview", h.apply_calls == 1, h.apply_calls)
+check("titlebar close actually closes the window", win5.get_visible() is False)
+# A second close() (as a real second Alt-F4 might do) must not double-fire.
+win5.close()
+check("closing twice does not revert the preview a second time",
+      h.apply_calls == 1, h.apply_calls)
+
 
 # =====================================================================
 # _on_custom_colors
@@ -378,6 +443,43 @@ check("Escape does not touch custom_colors_dark",
       h.config['custom_colors_dark'] == {'def:comment': {'fg': '#00ff00'}})
 check("Escape does not apply the scheme", h.apply_calls == 0, h.apply_calls)
 check("Escape closes the window", win4.get_visible() is False)
+
+
+# =====================================================================
+# _apply_gtk_theme (IMPORTANT 1, final review): libadwaita ignores
+# GtkSettings:gtk-application-prefer-dark-theme entirely — the real hook
+# is Adw.StyleManager.set_color_scheme(). Assert against the actual
+# libadwaita singleton, not a stub, so this would fail if _apply_gtk_theme
+# regressed back to the ignored GtkSettings property.
+# =====================================================================
+
+h = Host()
+style_manager = Adw.StyleManager.get_default()
+
+h.config['dark_theme'] = True
+h._apply_gtk_theme()
+check("dark_theme=True makes Adw.StyleManager.get_default().get_dark() True",
+      style_manager.get_dark() is True, style_manager.get_dark())
+check("dark_theme=True sets color-scheme to FORCE_DARK",
+      style_manager.get_color_scheme() == Adw.ColorScheme.FORCE_DARK,
+      style_manager.get_color_scheme())
+
+h.config['dark_theme'] = False
+h._apply_gtk_theme()
+check("dark_theme=False makes Adw.StyleManager.get_default().get_dark() False",
+      style_manager.get_dark() is False, style_manager.get_dark())
+check("dark_theme=False sets color-scheme to FORCE_LIGHT",
+      style_manager.get_color_scheme() == Adw.ColorScheme.FORCE_LIGHT,
+      style_manager.get_color_scheme())
+
+# The old gtk-application-prefer-dark-theme approach is what logged an
+# Adwaita-WARNING on every launch (libadwaita warns when that ignored
+# property is used) — confirm _apply_gtk_theme no longer triggers it.
+with capture_c_stderr() as cap:
+    h.config['dark_theme'] = True
+    h._apply_gtk_theme()
+check("_apply_gtk_theme does not trigger an Adwaita-WARNING",
+      'Adwaita-WARNING' not in cap['output'], cap['output'])
 
 
 print()

@@ -552,6 +552,20 @@ check("'Yes' actually closes the tab", pn not in h.tabs)
 check("'Yes' calls the callback exactly once", seen == ['done'], seen)
 check("'Yes' also closes the window", win.get_visible() is False)
 
+# MINOR 5 (final review): the confirm window must be closed BEFORE the
+# caller's chained callback runs, not after — a raising callback (e.g. a
+# broken link in a _close_tab_chain) would otherwise strand this
+# modal=True confirm window open forever. Assert the window is already
+# invisible at the moment the callback observes it.
+pn, t = modified_tab('mod1b.txt')
+visible_during_callback = []
+win = capture_window(lambda: h._close_tab(
+    pn, callback=lambda: visible_during_callback.append(win.get_visible())))
+by_label = {b.get_label(): b for b in labeled_buttons(win)}
+by_label["Yes"].emit('clicked')
+check("confirm window is already closed when the chained callback runs",
+      visible_during_callback == [False], visible_during_callback)
+
 # Modified tab, click "No": stays open, callback still fires.
 pn, t = modified_tab('mod2.txt')
 seen.clear()

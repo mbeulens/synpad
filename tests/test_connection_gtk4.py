@@ -168,6 +168,26 @@ check("Escape closes the dialog", dlg3.get_visible() is False)
 press_escape(dlg3)
 check("callback fires exactly once per choose()", received3 == ['cancel'], received3)
 
+# Titlebar close / Alt-F4 / destroyed-transient-parent path (IMPORTANT 3,
+# final review): before this fix, ConnectDialog had no 'close-request'
+# handler at all, so closing it this way never invoked choose()'s
+# callback — both consumers (remote.py and dialogs.py) do real work
+# unconditionally in the cancel branch (rebuilding the quick-connect
+# menu), so a server deleted inside the dialog and then closed via the
+# titlebar left stale entries in that menu.
+dlg6 = ConnectDialog(parent, dict(base_config))
+received6 = []
+dlg6.choose(lambda d, resp: received6.append(resp))
+dlg6.close()
+check("titlebar close (close-request) invokes the callback with 'cancel'",
+      received6 == ['cancel'], received6)
+check("titlebar close actually closes the dialog", dlg6.get_visible() is False)
+# A second close() (as a real second Alt-F4 might do) must not double-fire
+# or recurse — self.close() below on the first invocation itself raises
+# 'close-request' again, so this also proves that reentry is guarded.
+dlg6.close()
+check("closing twice does not re-invoke the callback", received6 == ['cancel'], received6)
+
 
 # =====================================================================
 # _on_delete_server — Adw.AlertDialog.choose() replaces MessageDialog.run()

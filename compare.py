@@ -469,8 +469,10 @@ class CompareMixin:
 
         for line_idx, lbl in minimap_labels:
             click = Gtk.GestureClick()
-            # No set_button() call — any button triggers the scroll, same
-            # as the old add_events(BUTTON_PRESS_MASK) with no button guard.
+            # A bare Gtk.GestureClick defaults to button 1 only.
+            # set_button(0) matches the old add_events(BUTTON_PRESS_MASK)
+            # with no button guard, so any button triggers the scroll.
+            click.set_button(0)
             click.connect('pressed',
                           lambda _g, _n, _x, _y, idx=line_idx: _on_minimap_click(idx))
             lbl.add_controller(click)

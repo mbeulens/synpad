@@ -624,12 +624,15 @@ class RemoteMixin:
 
         def resolve(name):
             # Guards against being invoked twice for one dialog — e.g.
-            # finish() closes the window itself, which raises
-            # 'close-request', whose handler also calls resolve(); without
-            # this guard the callback would fire a second time.
+            # win.close() below raises 'close-request', whose handler
+            # also calls resolve(); without this guard the callback would
+            # fire a second time. The window is closed before callback()
+            # runs (not after) so a raising callback can't strand this
+            # modal=True window open.
             if resolved[0]:
                 return
             resolved[0] = True
+            win.close()
             callback(name)
 
         def finish(accepted):
@@ -639,7 +642,6 @@ class RemoteMixin:
                 if typed:
                     name = typed
             resolve(name)
-            win.close()
 
         entry.connect('activate', lambda _e: finish(True))
 

@@ -600,6 +600,19 @@ win.close()
 check("_ask_name callback fires exactly once even if close() is called twice",
       received == [None], received)
 
+# MINOR 5 (final review): the window must be closed BEFORE the caller's
+# callback runs, not after — a raising callback would otherwise strand
+# this modal=True window open forever. Assert the window is already
+# invisible at the moment the callback observes it (recorded from inside
+# the callback itself, not after _ask_name returns).
+visible_during_callback = []
+win = capture_window(lambda: h2._ask_name(
+    "New File", "File name:",
+    lambda name: visible_during_callback.append(win.get_visible())))
+click_button(win, "Create")
+check("window is already closed when the callback runs",
+      visible_during_callback == [False], visible_during_callback)
+
 received = []
 win = capture_window(lambda: h2._ask_name("New File", "File name:", ok_label="Create",
                                            callback=lambda name: received.append(name)))
