@@ -33,6 +33,26 @@ and handles activation internally.
 6. **No new dependencies.** GTK 4.14.5, libadwaita 1.5, GtkSourceView 5,
    Vte 3.91 are installed; nothing else may be added.
 7. **Never dispatch subagents of your own.** Review comes from the controller.
+8. **NEVER touch the user's real config, session, or keyring.** This is not
+   advisory. During Task 2 an implementer called the real `save_config()`
+   during ad-hoc verification and overwrote
+   `~/.config/synpad/config.json` — the user's actual servers and
+   credentials — with test data. It was restored from a four-month-old
+   backup; any settings changed in between were unrecoverable.
+
+   Before running ANY code that could reach config, session or keyring —
+   test files AND throwaway verification snippets alike — export a
+   throwaway config root:
+
+   ```bash
+   export XDG_CONFIG_HOME=$(mktemp -d)
+   ```
+
+   Tests must additionally monkeypatch `save_config` / `load_config` and
+   `secrets_store` before touching any dialog. `remote.py`, `editor.py`
+   and `window.py` all call `save_config()`, so this applies to Tasks 3,
+   4 and 5 without exception. If you are unsure whether a snippet writes
+   config, assume it does.
 
 ## Established patterns — use these verbatim
 
