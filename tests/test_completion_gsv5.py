@@ -22,8 +22,9 @@ if not Gtk.init_check():
 import config
 assert '/home/beuner/.config' not in config.CONFIG_DIR, "NOT ISOLATED"
 
-from completion import (make_completion_providers, COMPLETION_LANGS,
-                        PHP_COMPLETIONS, JS_COMPLETIONS)
+import completion as C
+from completion import (make_completion_providers, warm_completion_cache,
+                        COMPLETION_LANGS, PHP_COMPLETIONS, JS_COMPLETIONS)
 
 fails = []
 def check(n, c, extra=""):
@@ -31,31 +32,46 @@ def check(n, c, extra=""):
     if not c: fails.append(n)
 
 # --- providers are the built-in C ones, never a Python subclass ------------
+# Warming builds one shared provider per distinct language table, so the
+# index is ready before the user types rather than filling while they do.
+n = warm_completion_cache()
+check("warm_completion_cache builds one provider per table",
+      n == 2, n)   # PHP, and JS shared by js/jsx/ts/tsx
+
 buf = GtkSource.Buffer()
 provs, keep = make_completion_providers(PHP_COMPLETIONS, buf)
-check("one CompletionWords provider, both buffers registered",
-      len(provs) == 1, len(provs))
+check("a known language gets document + language providers",
+      len(provs) == 2, len(provs))
 check("both are built-in CompletionWords",
       all(isinstance(p, GtkSource.CompletionWords) for p in provs),
       [type(p).__name__ for p in provs])
 check("no Python-implemented provider is used",
       all(type(p).__module__.startswith('gi.') for p in provs),
       [type(p).__module__ for p in provs])
-check("seeded language buffer is kept alive", len(keep) == 1 and isinstance(keep[0], GtkSource.Buffer))
-check("provider has a sane minimum word size",
-      provs[0].get_property('minimum-word-size') == 2)
+check("seed buffers are held at module scope, not per tab",
+      keep == [] and len(C._LANG_SEEDS) >= 1, (keep, len(C._LANG_SEEDS)))
+check("language provider is shared between tabs",
+      make_completion_providers(PHP_COMPLETIONS, GtkSource.Buffer())[0][1] is provs[1])
+check("each tab still gets its own document provider",
+      make_completion_providers(PHP_COMPLETIONS, GtkSource.Buffer())[0][0] is not provs[0])
+check("js and ts share one provider (same table object)",
+      make_completion_providers(COMPLETION_LANGS['js'], GtkSource.Buffer())[0][1]
+      is make_completion_providers(COMPLETION_LANGS['ts'], GtkSource.Buffer())[0][1])
 
 # --- unknown language still gets document completion -----------------------
 p2, k2 = make_completion_providers(None, GtkSource.Buffer())
-check("unknown language: provider present, no seed buffer",
+check("unknown language: document provider only",
       len(p2) == 1 and k2 == [])
 
 # --- the seed buffer really carries the language's words -------------------
-seed_text = keep[0].get_text(keep[0].get_start_iter(), keep[0].get_end_iter(), False)
+_seed = C._LANG_SEEDS[0]
+seed_text = _seed.get_text(_seed.get_start_iter(), _seed.get_end_iter(), False)
 for word in ('array_map', 'str_replace', 'foreach', 'function'):
     check(f"seed contains {word!r}", word in seed_text.split())
 check("seed covers the whole table", len(seed_text.split()) == len(PHP_COMPLETIONS),
       (len(seed_text.split()), len(PHP_COMPLETIONS)))
+check("seed is chunked across lines (CompletionWords scans by line)",
+      seed_text.count("\n") > 10 and max(len(l.split()) for l in seed_text.splitlines()) <= 20)
 
 # --- language tables intact (signature_help.py reads these) ----------------
 check("COMPLETION_LANGS covers ts/tsx (v1.21.1)",

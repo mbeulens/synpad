@@ -329,6 +329,62 @@ COMPLETION_LANGS = {
 # from signature_help.py's popover, which reads the same tables below.
 
 
+# One shared, pre-warmed provider per language table.
+#
+# GtkSourceCompletionWords indexes its registered buffers on an idle, and the
+# seeded language table is far larger than a normal document. Building it
+# lazily when a tab is created meant the index was still filling while the
+# user typed: with no matches yet the popup has no rows, measures zero wide,
+# and GDK refuses to map it --
+#     Gdk-CRITICAL: gdk_popup_present: assertion 'width > 0' failed
+# -- so completion appeared broken for roughly the first ten seconds, and
+# intermittently after that depending on what else the main loop was doing
+# (opening a remote file keeps it busy). Under XWayland the slower startup
+# hid this, because the index finished before the first keystroke.
+#
+# The tables are static, so the provider is built once, cached, and shared by
+# every tab using that language. warm_completion_cache() starts the indexing
+# at application startup, before any typing.
+_LANG_PROVIDERS = {}
+_LANG_SEEDS = []          # module-level: CompletionWords does not own these
+
+
+def _seed_text(lang_dict):
+    """Lay the words out ~20 per line; CompletionWords scans by line."""
+    names = sorted(lang_dict.keys())
+    return "\n".join(" ".join(names[i:i + 20]) for i in range(0, len(names), 20))
+
+
+def _language_provider(lang_key, lang_dict):
+    """Return the shared, already-indexing provider for this language."""
+    prov = _LANG_PROVIDERS.get(lang_key)
+    if prov is not None:
+        return prov
+    seed = GtkSource.Buffer()
+    seed.set_text(_seed_text(lang_dict))
+    prov = GtkSource.CompletionWords.new('SynPad')
+    prov.set_property('minimum-word-size', 2)
+    prov.set_property('priority', 1)
+    prov.set_property('scan-batch-size', 500)
+    prov.set_property('proposals-batch-size', 1000)
+    prov.register(seed)
+    _LANG_PROVIDERS[lang_key] = prov
+    _LANG_SEEDS.append(seed)
+    return prov
+
+
+def warm_completion_cache():
+    """Build and start indexing every language provider.
+
+    Called once at startup so the index is ready before the user types,
+    rather than filling while they do.
+    """
+    for key, table in COMPLETION_LANGS.items():
+        if id(table) not in _LANG_PROVIDERS:
+            _language_provider(id(table), table)
+    return len(_LANG_PROVIDERS)
+
+
 def make_completion_providers(lang_dict, doc_buffer):
     """Build the completion providers for one editor tab.
 
@@ -340,35 +396,18 @@ def make_completion_providers(lang_dict, doc_buffer):
     as long as the tab lives: it holds the hidden GtkSource.Buffer seeded with
     the language words, which CompletionWords does not own.
     """
-    # One provider, both buffers registered. CompletionWords is designed to
-    # scan several buffers (register() can be called repeatedly); using two
-    # separate instances of the same provider type was not the documented
-    # usage and is the only structural difference from a plain setup.
-    words = GtkSource.CompletionWords.new('SynPad')
-    words.set_property('minimum-word-size', 2)
-    words.set_property('priority', 1)
-    # Defaults are 50 lines / 300 proposals per batch. The seeded language
-    # table is far larger than a typical document, and a partially-scanned
-    # buffer yields completions that appear to work intermittently.
-    words.set_property('scan-batch-size', 500)
-    words.set_property('proposals-batch-size', 1000)
-    words.register(doc_buffer)
-
-    providers = [words]
+    providers = []
     keep_alive = []
 
+    # Document words: per tab, since each has its own buffer.
+    doc_words = GtkSource.CompletionWords.new('Document')
+    doc_words.set_property('minimum-word-size', 3)
+    doc_words.set_property('priority', 0)
+    doc_words.register(doc_buffer)
+    providers.append(doc_words)
+
+    # Language words: the shared, pre-warmed provider.
     if lang_dict:
-        # Lay the words out over multiple lines rather than one very long one.
-        # CompletionWords scans by LINE (scan-batch-size defaults to 50 lines),
-        # so a single ~900-word line is one line's worth of work and is the
-        # kind of shape a per-line limit would silently truncate. Chunking at
-        # 20 words gives ~45 lines for PHP -- still inside one batch, so the
-        # whole list is indexed in a single pass.
-        names = sorted(lang_dict.keys())
-        lines = [" ".join(names[i:i + 20]) for i in range(0, len(names), 20)]
-        seed = GtkSource.Buffer()
-        seed.set_text("\n".join(lines))
-        words.register(seed)
-        keep_alive.append(seed)
+        providers.append(_language_provider(id(lang_dict), lang_dict))
 
     return providers, keep_alive

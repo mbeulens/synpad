@@ -32,6 +32,18 @@ class SynPadApplication(Adw.Application):
         # widgets rendering unstyled fails loudly rather than silently.
         Adw.init()
 
+        # Start indexing the completion word lists now, not when the first
+        # tab is created. GtkSourceCompletionWords indexes on an idle, and
+        # the language tables are large; doing it lazily meant the index was
+        # still filling while the user typed, so the popup had no rows,
+        # measured zero wide, and GDK refused to map it. Roughly ten seconds
+        # of "completion is broken" at every launch.
+        try:
+            from completion import warm_completion_cache
+            warm_completion_cache()
+        except Exception:
+            pass          # completion is a convenience; never block startup
+
         # Suppress all GTK/GLib warning and critical messages from stderr
         import ctypes
         try:
