@@ -149,9 +149,9 @@ class LocalFilesMixin:
         click.connect('pressed', self._on_local_tree_right_click)
         view.add_controller(click)
 
-        # Single-click folder toggle -- see remote.py's _on_tree_single_click
-        # for the full rationale. CAPTURE phase so a press on the expander
-        # arrow reaches us; GTK4's own gesture claims it and does nothing.
+        # Single-click folder toggle -- see remote.py's _on_tree_single_click.
+        # CAPTURE, never claims, and skips the expander-arrow zone which GTK
+        # already handles.
         toggle = Gtk.GestureClick()
         toggle.set_button(1)
         toggle.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
@@ -170,6 +170,18 @@ class LocalFilesMixin:
         if not path_info:
             return False
         tree_path = path_info[0]
+        column = path_info[1]
+        # Leave the expander arrow to GTK. Its own gesture already toggles a
+        # press there; if we toggled too, the two would cancel out and the
+        # arrow would appear dead -- which is exactly what v2.0.11/2.0.12 did.
+        # The arrow sits left of the cell area, so anything at x < cell_area.x
+        # is GTK's to handle.
+        try:
+            cell = view.get_cell_area(tree_path, column)
+        except Exception:
+            cell = None
+        if cell is not None and int(x) < cell.x:
+            return False
         try:
             tree_iter = self._local_store.get_iter(tree_path)
         except ValueError:

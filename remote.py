@@ -471,14 +471,10 @@ class RemoteMixin:
         # does not respond here, so folders needed a double-click (the
         # row-activated path) -- a behaviour regression reported from real use.
         #
-        # CAPTURE phase, measured rather than assumed. At BUBBLE this fired
-        # for clicks on the folder NAME but not on the expander arrow: GTK4's
-        # own CAPTURE-phase button-1 gesture claims a press on the arrow and
-        # then does nothing with it, so the sequence never reached BUBBLE.
-        # Running at CAPTURE (and prepended, so ahead of GTK's) makes the
-        # arrow and the name behave identically, as they did under GTK3.
-        # We deliberately do NOT claim the sequence -- row selection and
-        # drag still need it.
+        # CAPTURE so we see the press before GTK's own gesture, and we never
+        # claim the sequence -- row selection and drag still need it. The
+        # handler itself skips the expander-arrow zone, because GTK already
+        # toggles there; handling both would cancel out.
         toggle = Gtk.GestureClick()
         toggle.set_button(1)
         toggle.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
@@ -497,6 +493,18 @@ class RemoteMixin:
         if not path_info:
             return False
         tree_path = path_info[0]
+        column = path_info[1]
+        # Leave the expander arrow to GTK. Its own gesture already toggles a
+        # press there; if we toggled too, the two would cancel out and the
+        # arrow would appear dead -- which is exactly what v2.0.11/2.0.12 did.
+        # The arrow sits left of the cell area, so anything at x < cell_area.x
+        # is GTK's to handle.
+        try:
+            cell = view.get_cell_area(tree_path, column)
+        except Exception:
+            cell = None
+        if cell is not None and int(x) < cell.x:
+            return False
         try:
             tree_iter = self.tree_store.get_iter(tree_path)
         except ValueError:

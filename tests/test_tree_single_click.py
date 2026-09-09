@@ -85,6 +85,16 @@ for _ in range(80):
 area = view.get_cell_area(dpath, view.get_column(0))
 cx, cy = area.x + 20, area.y + area.height // 2
 
+# The expander-arrow zone must be left to GTK, or our toggle and GTK's
+# cancel each other and the arrow looks dead (the v2.0.11/2.0.12 bug).
+bg = view.get_background_area(dpath, view.get_column(0))
+arrow_x = bg.x + max(0, (area.x - bg.x) // 2)
+check("arrow zone exists left of the cell area", area.x > bg.x, (bg.x, area.x))
+was = view.row_expanded(dpath)
+r = h._on_tree_single_click(FakeGesture(view), 1, arrow_x, cy)
+check("click in the ARROW zone is left to GTK (we do not toggle)",
+      view.row_expanded(dpath) == was)
+
 check("directory starts collapsed", not view.row_expanded(dpath))
 h._on_tree_single_click(FakeGesture(view), 1, cx, cy)
 check("single click EXPANDS a directory", view.row_expanded(dpath))
