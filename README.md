@@ -103,8 +103,20 @@ Terminal=false
 Type=Application
 Categories=Development;TextEditor;
 StartupNotify=false
-StartupWMClass=synpad
+StartupWMClass=com.mbeulens.synpad
 ```
+
+`StartupWMClass` must be `com.mbeulens.synpad`, not the older `synpad`.
+Under XWayland, GTK4 falls back to `g_get_prgname()`
+(`GLib.set_prgname("synpad")`), so `xprop WM_CLASS` still reports
+`("synpad" "synpad")` there. But under **native Wayland** — the mode
+this port exists to reach — GTK4 sets the Wayland `xdg_toplevel` app_id
+directly from `Adw.Application`'s `application_id`
+(`com.mbeulens.synpad`), independent of `prgname` entirely, and Mutter
+matches a Wayland client's app_id against the launcher's
+`StartupWMClass` for taskbar/dock icon grouping. A `StartupWMClass` of
+`synpad` only matches the XWayland case; on native Wayland it leaves
+SynPad grouped under a generic icon instead of its own.
 
 ## Keyboard Shortcuts
 

@@ -187,7 +187,7 @@ Recorded as they bite, so later modules do not rediscover them.
 
 ## Test suite
 
-All 15 files in `tests/` pass under an isolated `$HOME`/`$XDG_CONFIG_HOME`
+All 16 files in `tests/` pass under an isolated `$HOME`/`$XDG_CONFIG_HOME`
 (see "Global Constraints" above — every file redirects `$HOME` before
 importing `config`, and monkeypatches `save_config`/`secrets_store` besides):
 
@@ -251,6 +251,13 @@ trusting v2 day to day:
   exercise it.
 - **Tools-pane header buttons** (Clear / New terminal / Stop Claude /
   Detach) sit flush right, as intended.
+- **Confirm SynPad groups under its own icon in the dash/taskbar** rather
+  than a generic one. Under native Wayland the desktop launcher's
+  `StartupWMClass` must match the `xdg_toplevel` app_id
+  (`com.mbeulens.synpad`, from `Adw.Application`'s `application_id`), not
+  the old XWayland-only `synpad` — see README.md's Desktop Launcher
+  section. Not verifiable headlessly: needs a real desktop-shell dock/
+  taskbar to look at.
 - **Quit with unsaved changes**, both answers (save-and-quit, discard).
 - **The intermittent Chrome-paste hang** this whole port exists to fix.
   This is the one item that isn't a quick manual check — it needs real use

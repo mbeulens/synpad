@@ -61,6 +61,13 @@ New method `open_or_focus_file(filepath)`:
 
 - `Exec=python3 /home/beuner/Development/Local/Synpad/repo/synpad.py %f` → `%F` to accept multiple files.
 
+**GTK4 port note (Task 6):** on the `gtk4` branch, `StartupWMClass` must be
+`com.mbeulens.synpad` (the `Adw.Application` id), not `synpad`. Under
+native Wayland, GTK4 sets the `xdg_toplevel` app_id straight from
+`application_id`, independent of `GLib.set_prgname()`; only the XWayland
+path still matches on `synpad`. See `README.md`'s Desktop Launcher section
+for the current example.
+
 ## Data flow
 
 **Cold launch with file:**
