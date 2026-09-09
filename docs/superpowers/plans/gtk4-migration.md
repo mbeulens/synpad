@@ -45,8 +45,17 @@ and handles activation internally.
    throwaway config root:
 
    ```bash
-   export XDG_CONFIG_HOME=$(mktemp -d)
+   export HOME=$(mktemp -d)          # THIS is the one that works
+   export XDG_CONFIG_HOME="$HOME/.config"
    ```
+
+   **`XDG_CONFIG_HOME` alone does NOT isolate anything.** `config.py:21`
+   derives `CONFIG_DIR` from `Path.home()`, so only overriding `$HOME`
+   redirects it. Verified: with `XDG_CONFIG_HOME=/tmp/fake`, `CONFIG_DIR`
+   still resolves to the user's real `~/.config/synpad`. Tasks 3-5 were
+   given the ineffective form of this constraint; what actually protected
+   the config was test-level monkeypatching of `save_config`, which is
+   therefore mandatory, not belt-and-braces.
 
    Tests must additionally monkeypatch `save_config` / `load_config` and
    `secrets_store` before touching any dialog. `remote.py`, `editor.py`
