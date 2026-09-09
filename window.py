@@ -356,11 +356,15 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         col.add_attribute(text_renderer, 'text', 0)
         self.tree_view.append_column(col)
 
-        # 12px left margin so the root-level expander arrows clear the
-        # Gtk.Paned divider's grab area, which is wider than the visible
-        # handle and was swallowing presses on the first ~10px of the tree.
-        self.tree_view.set_margin_start(12)
         self.scroll_tree.set_child(self.tree_view)
+        # 12px gutter so the root-level expander arrows clear Gtk.Paned's
+        # divider grab area, which is wider than the visible handle and was
+        # swallowing presses on the first ~10px of the tree.
+        #
+        # The margin goes on the ScrolledWindow, NOT the TreeView: inside the
+        # viewport it would add to the tree's requested width and force a
+        # permanent horizontal scrollbar even with everything collapsed.
+        self.scroll_tree.set_margin_start(12)
         self.scroll_tree.set_vexpand(True)
         remote_box.append(self.scroll_tree)
 
@@ -436,8 +440,8 @@ class SynPadWindow(Gtk.ApplicationWindow, EditorMixin, RemoteMixin, LocalFilesMi
         self._local_view.connect('row-expanded', self._on_local_tree_expanded)
         self._local_attach_tree_controllers(self._local_view)
 
-        self._local_view.set_margin_start(12)   # see scroll_tree above
         self._local_scroll.set_child(self._local_view)
+        self._local_scroll.set_margin_start(12)  # see scroll_tree above
         self._local_scroll.set_vexpand(True)
         local_box.append(self._local_scroll)
 
