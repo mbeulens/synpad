@@ -265,3 +265,42 @@ trusting v2 day to day:
   reproduced under instrumentation even on GTK3; absence of the hang after
   a few days of native-Wayland use is the actual signal, not a single
   paste.
+
+## Completion under GtkSourceView 5 — what is settled
+
+Found the hard way while running v2. Do not re-litigate any of this.
+
+- **A completion provider cannot be implemented from Python on this stack.**
+  GSV5's only population entry point is the async
+  `populate_async`/`populate_finish` vfunc pair. Six styles were tried:
+  `Gio.Task` with `return_value` / `return_boolean` / `return_pointer`, a
+  Task created without a callback and invoked manually,
+  `Gio.SimpleAsyncResult`, and no async result at all. Five segfault; the
+  sixth cannot pass a result (`callback` rejects `None`). A **minimal
+  do-nothing provider crashes identically**, so it is not application logic.
+- **Consequence: signatures cannot appear in the completion list.** Rendering
+  `name  (signature)` needed that interface. The signatures themselves are
+  unaffected — `signature_help.py`'s popover reads the same tables.
+- **Completion therefore uses the built-in `GtkSource.CompletionWords`**,
+  seeded via `register()` with a hidden buffer of the language's words, plus
+  a second instance on the tab's own buffer for document words.
+- **Providers must not be shared between tabs.** One `CompletionWords`
+  belongs to the `GtkSourceCompletion` it is added to. Sharing was tried in
+  v2.0.22 and regressed completion.
+- **The word list must be indexed before the user types.**
+  `CompletionWords` scans registered buffers on an idle. The seed is sorted
+  alphabetically and scanned in order, so a partial index silently yields
+  `array_*` but not `is_*` or `str_*`. Indexing is 0.31s on an idle loop, but
+  at startup the loop is busy with SFTP and the file tree, starving it for
+  seconds. `warm_completion_cache()` builds the providers at startup, before
+  any window exists, and the first tab of each language takes the pre-indexed
+  one.
+- **`SYNPAD_COMPLETION_DEBUG=1`** logs, per keystroke, the typed prefix, the
+  provider count, the number of proposal rows, and what
+  `GtkSourceCompletionList` measures. Five attempts at the intermittency were
+  reasoned from source and wrong; one run with this logging identified it.
+  Reach for it first.
+- **`.completion` carries a CSS minimum width.** A popup with no rows
+  measures zero and GDK refuses to map it
+  (`gdk_popup_present: assertion 'width > 0' failed`). The minimum width stops
+  a briefly-empty popup failing to map at all.
