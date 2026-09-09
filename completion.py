@@ -346,6 +346,7 @@ COMPLETION_LANGS = {
 # every tab using that language. warm_completion_cache() starts the indexing
 # at application startup, before any typing.
 _SEED_TEXT = {}          # lang table id -> pre-built seed text
+_WARM_POOL = {}          # lang table id -> provider indexed at startup
 _LANG_SEEDS = []          # module-level: CompletionWords does not own these
 
 
@@ -377,14 +378,36 @@ def _language_provider(lang_key, lang_dict):
 
 
 def warm_completion_cache():
-    """Pre-compute the seed text for each language table.
+    """Build one provider per language at startup so its index is ready.
 
-    Indexing itself is fast (0.31s measured for PHP's 1024 words), so this
-    only front-loads the string building, not the scan.
+    GtkSourceCompletionWords starts indexing when a buffer is register()ed,
+    and does the work on an idle. Indexing PHP's 1024 words takes 0.31s on an
+    idle main loop -- but at startup the loop is busy connecting SFTP and
+    loading the file tree, so the scan is starved for seconds. Because the
+    seed is sorted alphabetically and scanned in order, a partial index means
+    'array_*' completes while 'is_*' and 'str_*' silently do not. That is
+    exactly what the debug log showed:
+
+        prefix='is_numeric'  rows=0
+        prefix='arr'         rows=5
+
+    Building the providers here, before any window exists, means the scan
+    happens during the quiet part of startup. Each is handed to the first tab
+    that wants that language; later tabs build their own (0.31s, by which
+    point the loop is idle anyway). They are NOT shared -- one
+    CompletionWords belongs to the GtkSourceCompletion it is added to.
     """
     for table in COMPLETION_LANGS.values():
-        _SEED_TEXT.setdefault(id(table), _seed_text(table))
-    return len(_SEED_TEXT)
+        key = id(table)
+        _SEED_TEXT.setdefault(key, _seed_text(table))
+        if key not in _WARM_POOL:
+            _WARM_POOL[key] = _language_provider(key, table)
+    return len(_WARM_POOL)
+
+
+def _take_warm_provider(lang_key):
+    """Hand out the pre-indexed provider once, then fall back to building."""
+    return _WARM_POOL.pop(lang_key, None)
 
 
 def make_completion_providers(lang_dict, doc_buffer):
@@ -410,6 +433,9 @@ def make_completion_providers(lang_dict, doc_buffer):
 
     # Language words: the shared, pre-warmed provider.
     if lang_dict:
-        providers.append(_language_provider(id(lang_dict), lang_dict))
+        key = id(lang_dict)
+        # Prefer the provider warmed at startup; its index is already built.
+        providers.append(_take_warm_provider(key)
+                         or _language_provider(key, lang_dict))
 
     return providers, keep_alive

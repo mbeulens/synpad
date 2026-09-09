@@ -244,14 +244,16 @@ class EditorMixin:
 
             if _dbg:
                 import sys as _sys
-                seeded = keep_alive[0] if keep_alive else None
-                nwords = (len(seeded.get_text(seeded.get_start_iter(),
-                                              seeded.get_end_iter(),
-                                              False).split())
-                          if seeded is not None else 0)
+                import completion as _C
+                total = sum(
+                    len(b.get_text(b.get_start_iter(), b.get_end_iter(),
+                                   False).split())
+                    for b in _C._LANG_SEEDS)
                 print(f"[completion]   added {len(providers)} provider(s): "
                       f"{[p.get_title() for p in providers]}; "
-                      f"seed words={nwords}", file=_sys.stderr, flush=True)
+                      f"indexed seed words={total}; "
+                      f"warm pool remaining={len(_C._WARM_POOL)}",
+                      file=_sys.stderr, flush=True)
 
                 def _popup_state():
                     """What the completion popup actually is, right now."""

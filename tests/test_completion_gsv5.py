@@ -35,7 +35,9 @@ def check(n, c, extra=""):
 # Warming builds one shared provider per distinct language table, so the
 # index is ready before the user types rather than filling while they do.
 n = warm_completion_cache()
-check("warm_completion_cache pre-builds seed text per table", n == 2, n)
+check("warm_completion_cache pre-indexes one provider per table", n == 2, n)
+check("warm pool is populated before any tab exists",
+      len(C._WARM_POOL) == 2, len(C._WARM_POOL))
 
 buf = GtkSource.Buffer()
 provs, keep = make_completion_providers(PHP_COMPLETIONS, buf)
@@ -49,9 +51,12 @@ check("no Python-implemented provider is used",
       [type(p).__module__ for p in provs])
 check("seed buffers are retained (CompletionWords does not own them)",
       len(C._LANG_SEEDS) >= 1, len(C._LANG_SEEDS))
+# The first tab takes the pre-indexed provider; later tabs build their own.
 # Deliberately NOT shared: one CompletionWords belongs to one Completion.
-check("each tab gets its OWN language provider",
-      make_completion_providers(PHP_COMPLETIONS, GtkSource.Buffer())[0][1] is not provs[1])
+_second = make_completion_providers(PHP_COMPLETIONS, GtkSource.Buffer())[0]
+check("each tab gets its OWN language provider", _second[1] is not provs[1])
+check("the warm provider is handed out exactly once",
+      id(PHP_COMPLETIONS) not in C._WARM_POOL)
 check("each tab still gets its own document provider",
       make_completion_providers(PHP_COMPLETIONS, GtkSource.Buffer())[0][0] is not provs[0])
 check("js and ts seed from the same cached text",
