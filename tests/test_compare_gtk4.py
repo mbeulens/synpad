@@ -81,10 +81,14 @@ def capture_window(build_fn):
 
 
 class FakeNotebook:
+    """Stands in for the real Adw.TabView (Task 5's Gtk.Notebook -> Adw.
+    TabView conversion) — get_page_position() is identity here since this
+    test's self.tabs is still keyed by plain int for simplicity, which
+    sorts the same way a real TabPage's position would."""
     def __init__(self, current=0):
         self._current = current
-    def get_current_page(self): return self._current
-    def set_current_page(self, n): self._current = n
+    def get_selected_page(self): return self._current
+    def get_page_position(self, page): return page
 
 
 class FakeItemSave:

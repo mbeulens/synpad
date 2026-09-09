@@ -1,4 +1,13 @@
-"""SynPad session save/restore mixin."""
+"""SynPad session save/restore mixin.
+
+GTK4 note: Adw.TabView addresses tabs by Adw.TabPage object, not integer
+index (see window.py's module docstring), so self.tabs is keyed by
+TabPage. The session file itself is unaffected — it still stores
+'active_tab' as a plain integer position, since that's only ever read
+back immediately after recreating every tab in file order (position and
+insertion order coincide at that moment), never used to address a tab
+across a reorder.
+"""
 
 import json
 import os
@@ -12,8 +21,9 @@ class SessionMixin:
     def _save_session(self):
         """Save all open tabs to session file so they can be restored."""
         session_tabs = []
-        for page_num in range(self.notebook.get_n_pages()):
-            tab = self.tabs.get(page_num)
+        for i in range(self.notebook.get_n_pages()):
+            page = self.notebook.get_nth_page(i)
+            tab = self.tabs.get(page)
             if not tab:
                 continue
             start = tab.buffer.get_start_iter()
@@ -31,9 +41,12 @@ class SessionMixin:
                 'remote_mtime': tab.remote_mtime,
             })
 
+        active_page = self.notebook.get_selected_page()
+        active_index = (self.notebook.get_page_position(active_page)
+                        if active_page is not None else 0)
         session = {
             'tabs': session_tabs,
-            'active_tab': self.notebook.get_current_page(),
+            'active_tab': active_index,
         }
 
         os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -93,8 +106,8 @@ class SessionMixin:
                                     is_local=is_local, server_guid=server_guid)
 
             # Restore remote stats and mark as modified if needed
-            page_num = self.notebook.get_n_pages() - 1
-            tab = self.tabs.get(page_num)
+            page = self.notebook.get_nth_page(self.notebook.get_n_pages() - 1)
+            tab = self.tabs.get(page)
             if tab:
                 tab.remote_hash = tab_data.get('remote_hash')
                 tab.remote_mtime = tab_data.get('remote_mtime')
@@ -104,6 +117,6 @@ class SessionMixin:
         # Restore active tab
         active = session.get('active_tab', 0)
         if active < self.notebook.get_n_pages():
-            self.notebook.set_current_page(active)
+            self.notebook.set_selected_page(self.notebook.get_nth_page(active))
 
         self.item_save.set_sensitive(bool(self.tabs))

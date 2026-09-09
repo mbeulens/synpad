@@ -10,10 +10,12 @@ import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gdk, GLib
+gi.require_version('Adw', '1')
+from gi.repository import Gtk, Gdk, GLib, Adw
 
 if not Gtk.init_check():
     print("SKIP: no display"); sys.exit(0)
+Adw.init()
 
 import claude_tab
 from claude_tab import ClaudeMixin, PRESET_PROMPTS
@@ -40,7 +42,10 @@ class Host(ClaudeMixin, Gtk.Window):
         self.config = {}
         self.status = []
         self.tabs = {}
-        self.notebook = Gtk.Notebook()
+        # Task 5: the main editor tab strip is Adw.TabView now, addressed
+        # by TabPage object rather than integer index — the Tools/console
+        # notebook (_console_notebook) is unaffected, still Gtk.Notebook.
+        self.notebook = Adw.TabView()
         self._console_notebook = Gtk.Notebook()
         self._console_visible = True
         self.toggles = 0
@@ -83,8 +88,8 @@ check("_claude_set_stop_btn_visible(False) hides it (was .hide())",
 # --- code-for-question extraction (pure logic, guards the port) ----------
 buf1 = Gtk.TextBuffer()
 buf1.set_text("line one\nline two\nline three\n")
-h.tabs[0] = FakeTab(buf1, local_path='/tmp/foo.py')
-h.notebook.append_page(Gtk.Label(), Gtk.Label())  # page 0 exists
+page = h.notebook.append(Gtk.Label())  # the one open (and selected) tab
+h.tabs[page] = FakeTab(buf1, local_path='/tmp/foo.py')
 
 code, label = h._claude_get_code_for_question()
 check("whole-buffer extraction when no selection",
@@ -101,7 +106,7 @@ check("label includes line range for a selection", label2 == "foo.py:1-1", label
 
 # --- handle_trigger: no code available --------------------------------
 buf_empty = Gtk.TextBuffer()
-h.tabs[0] = FakeTab(buf_empty, local_path='/tmp/empty.py')
+h.tabs[page] = FakeTab(buf_empty, local_path='/tmp/empty.py')
 h._claude_handle_trigger('find_bugs')
 check("no code -> status set, nothing dispatched",
       h.status and h.status[-1] == "Open or select code to ask Claude about",
@@ -109,7 +114,7 @@ check("no code -> status set, nothing dispatched",
 
 # --- handle_trigger: non-custom preset sends directly, no dialog ---------
 h.status.clear()
-h.tabs[0] = FakeTab(buf1, local_path='/tmp/foo.py')
+h.tabs[page] = FakeTab(buf1, local_path='/tmp/foo.py')
 buf1.select_range(buf1.get_start_iter(), buf1.get_start_iter())  # clear selection
 sent = []
 h._claude_send = lambda code, prompt, label, key: sent.append((code, prompt, label, key))

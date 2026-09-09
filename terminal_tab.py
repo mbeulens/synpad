@@ -54,8 +54,8 @@ class TerminalMixin:
         2. local file tree's current path
         3. $HOME as a last resort"""
         try:
-            page_num = self.notebook.get_current_page()
-            tab = self.tabs.get(page_num)
+            page = self.notebook.get_selected_page()
+            tab = self.tabs.get(page)
             if tab and getattr(tab, 'is_local', False) and tab.local_path:
                 parent = os.path.dirname(tab.local_path)
                 if parent and os.path.isdir(parent):

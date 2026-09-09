@@ -16,13 +16,18 @@ Guards, matching the migration plan's Task 4 scope:
   Gtk.MessageDialog + .run() site becomes an async continuation with
   Escape and close-request (titlebar/Alt-F4) routed to the same decision
   as Cancel/No — driving the REAL widgets end to end, not stubs.
-- Gtk.Menu/Gtk.MenuItem -> Gio.Menu + Gtk.PopoverMenu for the tab context
-  menu, and GtkTextView.set_extra_menu for the editor's own "Ask Claude"
-  submenu (GTK4 removed 'populate-popup' entirely).
 - Gtk.FileChooserDialog + .run() -> the native async Gtk.FileDialog for
   "Open Local File" / "Save As".
-- The EventBox wrapper around the tab label is gone; a GestureClick is
-  attached directly to the label Box instead.
+
+Updated for Task 5 (Gtk.Notebook -> Adw.TabView): self.tabs is now keyed
+by Adw.TabPage, not integer page_num — the hand-built tab_box (label +
+close button + GestureClick) is gone entirely, replaced by TabPage.title
+and Adw.TabBar's own close button/middle-click/drag-reorder. The tab
+context menu is Adw.TabView's built-in one (Gio.Menu via 'setup-menu',
+driven here by emitting that signal directly, not a fake right-click
+gesture), not a hand-rolled Gtk.PopoverMenu. This isolated EditorMixin
+Host wires 'close-page'/'setup-menu' onto its own Adw.TabView itself,
+exactly as window.py's _connect_signals() does in production.
 
 Never touches the real ~/.config/synpad/config.json or the OS keyring —
 save_config is monkeypatched at module level before any dialog is
@@ -206,7 +211,17 @@ class Host(EditorMixin, Gtk.Window):
         self.tabs = {}
         self.ftp_mgr = None
         self.current_server_guid = ''
-        self.notebook = Gtk.Notebook()
+        # Task 5: Gtk.Notebook -> Adw.TabView. In production, window.py's
+        # _connect_signals() wires 'close-page'/'setup-menu' onto
+        # self.notebook; this isolated EditorMixin-only harness has no
+        # window.py, so it must wire them itself, exactly as SynPadWindow
+        # does — otherwise self.notebook.close_page()/_close_tab() would
+        # hit no signal handler at all and TabView's default (unconfirmed,
+        # immediate) close would run instead.
+        self.notebook = Adw.TabView()
+        self.notebook.connect('close-page', self._on_tab_close_page)
+        self.notebook.connect('setup-menu', self._on_tab_setup_menu)
+        self._pending_close_callbacks = {}
         self.set_child(self.notebook)
         self.item_save = FakeWidget()
         self.header = FakeHeader()
@@ -247,25 +262,35 @@ h = Host()
 h.present()
 
 
+def force_close_tab(page):
+    """Test-only cleanup: remove one tab without going through the async
+    confirm dialog at all, replacing the old _do_close_tab (folded into
+    _on_tab_close_page's finish() closure by the Task 5 Adw.TabView port,
+    so it's no longer a standalone method). Adw.TabPage keys need no
+    ordering care the way the old integer page_num scheme's
+    _reindex_tabs did — closing one never renumbers any other."""
+    tab = h.tabs.get(page)
+    if tab is None:
+        return
+    tab.modified = False  # _on_tab_close_page only confirms modified tabs
+    h.notebook.close_page(page)
+
+
 def force_close_all_tabs():
-    """Test-only cleanup: remove every open tab without going through the
-    (async, possibly-confirming) _close_tab path. Highest page_num first,
-    same invariant _close_all_tabs itself relies on — removing a lower
-    page_num first would renumber (via _reindex_tabs) the higher ones
-    still queued, which would otherwise skip/misfire on stale numbers."""
-    for pn in sorted(h.tabs.keys(), reverse=True):
-        h._do_close_tab(pn)
+    """Test-only cleanup: remove every open tab, unconditionally."""
+    for page in list(h.tabs.keys()):
+        force_close_tab(page)
 
 
 def make_tab(name, content='hello\nworld\n', is_local=True, modified=False):
     """Create a real editor tab via _create_editor_tab and return
-    (page_num, tab)."""
+    (page, tab) — page is the Adw.TabPage Task 5 now keys self.tabs by."""
     h._create_editor_tab(name, name if is_local else '', content, is_local=is_local)
-    page_num = h.notebook.get_current_page()
-    tab = h.tabs[page_num]
+    page = h.notebook.get_selected_page()
+    tab = h.tabs[page]
     if modified:
         tab.buffer.set_text(content + 'x')
-    return page_num, tab
+    return page, tab
 
 
 # =====================================================================
@@ -337,32 +362,17 @@ scroll = tab.source_view.get_parent()
 check("view lives in a ScrolledWindow via set_child (was scroll.add)",
       isinstance(scroll, Gtk.ScrolledWindow) and scroll.get_child() is tab.source_view)
 
-tab_box = h.notebook.get_tab_label(scroll)
-check("tab label widget is a Box directly (EventBox wrapper removed)",
-      isinstance(tab_box, Gtk.Box) and not any(
-          type(c).__name__ == 'EventBox' for c in find_all(tab_box, Gtk.Widget)))
-
-gestures = [c for c in tab_box.observe_controllers() if isinstance(c, Gtk.GestureClick)]
-check("tab_box has a GestureClick for right/middle-click (EventBox's button-press-event)",
-      len(gestures) >= 1, gestures)
-# GtkGestureSingle:button defaults to 1 (primary) -- NOT "any button". Left
-# unset, GTK's own dispatch filters out every button-2/button-3 press
-# before _on_tab_right_click's own `button not in (2, 3)` check ever runs,
-# making the entire tab context menu (and middle-click close) unreachable
-# in the real app even though calling the handler directly (as the tests
-# below do) can't see that: a directly-constructed FakeGesture/real-gesture
-# call bypasses GTK's own button-filtering dispatch entirely. This is the
-# one assertion in this file that actually exercises GTK's dispatch gate
-# rather than the handler's own logic.
-check("tab_box's GestureClick listens for ANY button (button=0), not just "
-      "the primary button (GtkGestureSingle:button defaults to 1)",
-      all(g.get_button() == 0 for g in gestures),
-      [g.get_button() for g in gestures])
-
-close_btns = [b for b in find_all(tab_box, Gtk.Button)]
-check("tab_box contains exactly the close button", len(close_btns) == 1, close_btns)
-check("close button uses set_icon_name (Gtk.Button.set_image is gone)",
-      close_btns[0].get_icon_name() == 'window-close-symbolic', close_btns[0].get_icon_name())
+# Task 5: Gtk.Notebook -> Adw.TabView. There is no more hand-built
+# tab_box/close-button/GestureClick at all — the tab's title lives on its
+# Adw.TabPage, and Adw.TabBar supplies the close button, middle-click
+# close and drag-reorder itself; the only thing left to assert here is
+# that the TabPage exists and is titled correctly.
+tab_page = h.notebook.get_page(scroll)
+check("_create_editor_tab's page is a real Adw.TabPage", isinstance(tab_page, Adw.TabPage))
+check("tab title is the file's basename (was the tab_box Gtk.Label's text)",
+      tab_page.get_title() == 'sample.py', tab_page.get_title())
+check("self.tabs is keyed by the Adw.TabPage object, not an integer",
+      page_num is tab_page)
 
 key_ctrls_on_view = [c for c in tab.source_view.observe_controllers()
                      if isinstance(c, Gtk.EventControllerKey)]
@@ -441,39 +451,35 @@ check("status reports highlighting disabled with the longest-line count",
 
 
 # =====================================================================
-# _on_tab_right_click — Gtk.Menu -> Gio.Menu + Gtk.PopoverMenu
+# _on_tab_setup_menu — Gtk.Menu/Gtk.MenuItem -> Gio.Menu on Adw.TabView's
+# built-in context-menu popover (Task 5). Adw.TabView owns right-click and
+# middle-click on a tab itself (via Adw.TabBar) — there is no more
+# tab_box/GestureClick/Gtk.PopoverMenu of our own to drive; the 'setup-menu'
+# signal (emitted by the library right before it shows its popover) is the
+# real integration point, so it's emitted directly here instead of faking a
+# right-click gesture.
 # =====================================================================
 
-class FakeGesture:
-    """A real Gtk.GestureClick's get_current_button() only reflects state
-    from an actual dispatched press — calling the handler directly needs a
-    fake that reports whichever button the test wants to simulate."""
-    def __init__(self, widget, button=3):
-        self._w = widget
-        self._b = button
-    def get_widget(self): return self._w
-    def get_current_button(self): return self._b
-
-
-def right_click(tab_widget):
-    return h._on_tab_right_click(FakeGesture(tab_widget, 3), 1, 5, 5)
-
-
-tab_box_long = h.notebook.get_tab_label(tab_long.source_view.get_parent())
-result = right_click(tab_box_long)
-check("right-click on tab returns True (menu shown)", result is True)
-popover = h._tab_ctx_popover
-menu_model = popover.get_menu_model()
-check("popover anchored to the clicked tab_box", popover.get_parent() is tab_box_long)
+page_long = h.notebook.get_page(tab_long.source_view.get_parent())
+h.notebook.emit('setup-menu', page_long)
+menu_model = h.notebook.get_menu_model()
 labels = flatten_labels(menu_model)
 check("tab menu includes Reload/Enable-HL/Close/Close All/Close All But This",
       labels == ["Reload from Disk", "Enable Syntax Highlighting (slow)",
                  "Close", "Close All", "Close All But This"], labels)
 
+# 'setup-menu' also fires with page=None when the menu closes — must not raise.
+try:
+    h.notebook.emit('setup-menu', None)
+    setup_none_ok = True
+except Exception:
+    setup_none_ok = False
+check("setup-menu with page=None (menu closing) does not raise", setup_none_ok)
+
 # A normal (non-suppressed) tab has no "Enable Syntax Highlighting" item.
-tab_box_normal = h.notebook.get_tab_label(tab.source_view.get_parent())
-right_click(tab_box_normal)
-labels2 = flatten_labels(h._tab_ctx_popover.get_menu_model())
+page_normal = h.notebook.get_page(tab.source_view.get_parent())
+h.notebook.emit('setup-menu', page_normal)
+labels2 = flatten_labels(h.notebook.get_menu_model())
 check("normal tab's menu has no Enable-Syntax-Highlighting item",
       "Enable Syntax Highlighting (slow)" not in labels2, labels2)
 check("normal tab's Reload label is 'Reload from Disk' (is_local tab)",
@@ -481,30 +487,35 @@ check("normal tab's Reload label is 'Reload from Disk' (is_local tab)",
 
 # Untitled local tab (no local_path / file doesn't exist yet) -> Reload disabled.
 h._create_editor_tab('Untitled 1', '', '', is_local=True)
-untitled_page = h.notebook.get_current_page()
+untitled_page = h.notebook.get_selected_page()
 untitled_tab = h.tabs[untitled_page]
-untitled_box = h.notebook.get_tab_label(untitled_tab.source_view.get_parent())
-right_click(untitled_box)
-# Gtk.Widget has no get_action_group()/lookup_action() (Task 1 gotcha) —
-# verify the disabled state by its practical effect: activating the
-# action must not call through to _confirm_then_refresh at all.
+h.notebook.emit('setup-menu', untitled_page)
+# Gio.Menu shows a disabled action's item as insensitive; verify the
+# disabled state by its practical effect instead: activating the action
+# (via the real action group Adw.TabView installed) must not call through
+# to _confirm_then_refresh at all.
 _orig_confirm = Host._confirm_then_refresh
 confirm_calls = []
 Host._confirm_then_refresh = lambda self, tab: confirm_calls.append(tab)
 try:
-    untitled_box.activate_action('tabctx.reload', None)
+    h.notebook.activate_action('tabctx.reload', None)
 finally:
     Host._confirm_then_refresh = _orig_confirm
 check("Reload action disabled for a never-saved untitled tab "
       "(activating it does not call _confirm_then_refresh)",
       confirm_calls == [], confirm_calls)
 
-# Middle-click closes the tab directly (unmodified -> no confirm dialog).
-mid_page, mid_tab = make_tab('midclick.txt', 'x')
-mid_box = h.notebook.get_tab_label(mid_tab.source_view.get_parent())
-h._on_tab_right_click(FakeGesture(mid_box, 2), 1, 0, 0)
-check("middle-click closes an unmodified tab immediately",
-      mid_page not in h.tabs)
+# Close action closes the right (currently-set-up) page.
+h.notebook.emit('setup-menu', untitled_page)
+h.notebook.activate_action('tabctx.close', None)
+check("tabctx.close closes the tab the menu was set up for",
+      untitled_page not in h.tabs)
+
+# Middle-click-to-close and drag-to-reorder are Adw.TabBar's own native
+# behavior now (no code of ours left to drive here — see task-5-report.md
+# for how this was verified instead: a real Adw.TabBar hosted in a shown
+# window, since there is no headless way to synthesize the exact internal
+# gesture AdwTabBox listens for without a real pointer device).
 
 
 # =====================================================================
@@ -549,7 +560,7 @@ by_label = {b.get_label(): b for b in labeled_buttons(win)}
 by_label["No"].emit('clicked')
 check("'No' does not close the tab", pn in h.tabs)
 check("'No' still calls the callback (guaranteed continuation)", seen == ['done'], seen)
-h._do_close_tab(pn)  # clean up
+force_close_tab(pn)  # clean up
 
 # Modified tab, Escape: stays open, callback still fires (bare Gtk.Window
 # has no built-in Escape-to-close, unlike Gtk.Dialog).
@@ -560,7 +571,7 @@ press_escape(win)
 check("Escape does not close the tab", pn in h.tabs)
 check("Escape still calls the callback", seen == ['done'], seen)
 check("Escape closes the confirm window itself", win.get_visible() is False)
-h._do_close_tab(pn)  # clean up
+force_close_tab(pn)  # clean up
 
 # Modified tab, titlebar/Alt-F4 close (win.close()): stays open, callback fires.
 pn, t = modified_tab('mod4.txt')
@@ -569,7 +580,7 @@ win = capture_window(lambda: h._close_tab(pn, callback=lambda: seen.append('done
 win.close()
 check("closing via win.close() does not close the tab", pn in h.tabs)
 check("closing via win.close() still calls the callback", seen == ['done'], seen)
-h._do_close_tab(pn)  # clean up
+force_close_tab(pn)  # clean up
 
 # No callback given (X button / tab-menu "Close" call sites): must not raise.
 pn, t = modified_tab('mod5.txt')
@@ -713,8 +724,8 @@ try:
     check("unmodified tab refreshes without any dialog", refresh_calls == [tab_r2], refresh_calls)
 finally:
     Host._refresh_tab = _orig_refresh_tab
-    h._do_close_tab(pn_r)
-    h._do_close_tab(pn_r2)
+    force_close_tab(pn_r)
+    force_close_tab(pn_r2)
 
 # Real (unstubbed) end-to-end reload: _refresh_tab -> _capture_view_state /
 # _apply_refreshed_content -> GLib.idle_add(_restore_scroll), pumping the
@@ -748,7 +759,7 @@ try:
     check("real _refresh_tab marks the buffer unmodified",
           tab_rl.buffer.get_modified() is False)
     check("real _refresh_tab reports status", 'Reloaded' in h.status[-1], h.status[-1])
-    h._do_close_tab(pn_rl)
+    force_close_tab(pn_rl)
 finally:
     shutil.rmtree(tmp_dir3, ignore_errors=True)
 
@@ -759,7 +770,7 @@ finally:
 # =====================================================================
 
 _, tab_goto = make_tab('goto.py', '\n'.join(f'line{i}' for i in range(20)))
-h.notebook.set_current_page(h.notebook.page_num(tab_goto.source_view.get_parent()))
+h.notebook.set_selected_page(h.notebook.get_page(tab_goto.source_view.get_parent()))
 
 win = capture_window(lambda: h._on_goto_line())
 check("goto-line window created", win is not None)
@@ -831,7 +842,7 @@ h._on_search_close()
 # =====================================================================
 
 _, tab_search = make_tab('search.txt', 'hello world\nhello there\n')
-h.notebook.set_current_page(h.notebook.page_num(tab_search.source_view.get_parent()))
+h.notebook.set_selected_page(h.notebook.get_page(tab_search.source_view.get_parent()))
 h._show_search(show_replace=True)
 check("search window built", h._search_window is not None)
 check("Find and Replace entries present",
@@ -851,16 +862,16 @@ check("titlebar close also clears search window state (close-request wired)",
 
 
 # =====================================================================
-# _update_tab_label — GTK4 child-walk (get_first_child/get_next_sibling)
-# replacing get_children()
+# _update_tab_label — Task 5: Adw.TabPage.set_title() replaces the old
+# get_first_child()/get_next_sibling() widget-tree walk to find the tab's
+# Gtk.Label entirely (there's no tab_box left to walk).
 # =====================================================================
 
 _, tab_lbl = make_tab('label.txt', 'x')
 h._update_tab_label(tab_lbl, "renamed.txt")
-tab_box_lbl = h.notebook.get_tab_label(tab_lbl.source_view.get_parent())
-lbl = find_all(tab_box_lbl, Gtk.Label)[0]
-check("_update_tab_label finds the Label via get_first_child/get_next_sibling",
-      lbl.get_text() == "renamed.txt", lbl.get_text())
+page_lbl = h.notebook.get_page(tab_lbl.source_view.get_parent())
+check("_update_tab_label sets the Adw.TabPage's title directly",
+      page_lbl.get_title() == "renamed.txt", page_lbl.get_title())
 
 
 # =====================================================================
@@ -1124,8 +1135,8 @@ check("XML pretty-print reports status", h.status[-1] == "XML formatted", h.stat
 # an empty-string result above would be meaningless): temporarily revert
 # to the old set_text()-inside-a-user-action shape and confirm it's caught.
 def _regressed_pretty_print_json(self):
-    page_num = self.notebook.get_current_page()
-    tab = self.tabs.get(page_num)
+    page = self.notebook.get_selected_page()
+    tab = self.tabs.get(page)
     buf = tab.buffer
     text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
     import json as _json
@@ -1140,7 +1151,7 @@ with capture_c_stderr() as regress_cap:
 check("capture_c_stderr() harness actually detects the set_text-in-user-action "
       "warning when it's reintroduced (proves the two checks above aren't vacuous)",
       'irreversible action' in regress_cap['output'], regress_cap['output'])
-h._do_close_tab(pn_regress)
+force_close_tab(pn_regress)
 
 force_close_all_tabs()
 

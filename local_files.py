@@ -345,9 +345,9 @@ class LocalFilesMixin:
                 self._local_store.remove(tree_iter)
                 self._set_status(f"Deleted {local_path}")
                 # Close any open tab for this file
-                for page_num, tab in list(self.tabs.items()):
+                for page, tab in list(self.tabs.items()):
                     if tab.is_local and tab.local_path == local_path:
-                        self._close_tab(page_num)
+                        self._close_tab(page)
                         break
             except Exception as e:
                 self._show_error("Delete Failed", str(e))

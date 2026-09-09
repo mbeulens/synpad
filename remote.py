@@ -1066,16 +1066,16 @@ class RemoteMixin:
         self._console_log(f"DELETE {remote_path}", 'success')
 
         # Close any open tab for this file
-        for page_num, tab in list(self.tabs.items()):
+        for page, tab in list(self.tabs.items()):
             if tab.remote_path == remote_path:
-                self._close_tab(page_num)
+                self._close_tab(page)
                 break
 
     def _open_file(self, remote_path):
         # Check if already open
-        for page_num, tab in self.tabs.items():
+        for page, tab in self.tabs.items():
             if tab.remote_path == remote_path:
-                self.notebook.set_current_page(page_num)
+                self.notebook.set_selected_page(page)
                 return
 
         self._set_status(f"Downloading {remote_path}...")
@@ -1099,8 +1099,8 @@ class RemoteMixin:
                     self._create_editor_tab(remote_path, local_path,
                                             content, False, srv_guid)
                     # Set remote stats on the newly created tab
-                    page_num = self.notebook.get_current_page()
-                    tab = self.tabs.get(page_num)
+                    page = self.notebook.get_selected_page()
+                    tab = self.tabs.get(page)
                     if tab:
                         tab.remote_mtime = r_mtime
                         tab.remote_size = r_size

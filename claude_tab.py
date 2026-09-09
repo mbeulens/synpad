@@ -110,8 +110,8 @@ class ClaudeMixin:
 
     def _claude_get_code_for_question(self):
         """Return (code, source_label) from active editor tab, or (None, None)."""
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if not tab:
             return None, None
         buf = tab.buffer

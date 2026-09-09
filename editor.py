@@ -252,85 +252,35 @@ class EditorMixin:
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroll.set_child(view)
 
-        # Tab label with close button. GTK4: no more EventBox wrapper —
-        # the right-click/middle-click gesture attaches straight to tab_box.
-        tab_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        tab_label = Gtk.Label(label=os.path.basename(remote_path))
-        tab_label.set_hexpand(True)
-        tab_box.append(tab_label)
-        close_btn = Gtk.Button()
-        close_btn.add_css_class('flat')
-        close_btn.set_icon_name('window-close-symbolic')
-        tab_box.append(close_btn)
-
-        click = Gtk.GestureClick()
-        # GtkGestureSingle:button defaults to 1 (primary), not "any
-        # button" — left unset, this gesture would silently never fire
-        # for the button-2/button-3 presses _on_tab_right_click filters
-        # for, making the entire tab context menu (and middle-click
-        # close) unreachable. 0 means "any button"; the handler's own
-        # `button not in (2, 3)` check still filters exactly as GTK3's
-        # `event.button` check did.
-        click.set_button(0)
-        click.connect('pressed', self._on_tab_right_click)
-        tab_box.add_controller(click)
-
-        # Remove welcome tab if present
+        # Remove welcome tab if present. It's untracked in self.tabs, so
+        # this synchronously falls into the "unknown page" branch of
+        # _on_tab_close_page below rather than the async confirm flow.
         if self.notebook.get_n_pages() == 1 and not self.tabs:
-            self.notebook.remove_page(0)
+            self.notebook.close_page(self.notebook.get_nth_page(0))
 
-        page_num = self.notebook.append_page(scroll, tab_box)
-        self.notebook.set_tab_reorderable(scroll, True)
-        self.notebook.set_current_page(page_num)
+        # Adw.TabView addresses tabs by TabPage object, not integer index —
+        # title/close-button/context-menu are all driven off the TabPage
+        # (via Adw.TabBar) instead of a hand-built tab_box widget, so there
+        # is no more custom label/close-button/gesture construction here.
+        page = self.notebook.append(scroll)
+        page.set_title(os.path.basename(remote_path))
+        self.notebook.set_selected_page(page)
 
         tab = OpenTab(remote_path, local_path, view, buf,
                       is_local=is_local, server_guid=server_guid)
         tab.highlight_suppressed = bool(lang) and not highlighted
-        self.tabs[page_num] = tab
+        self.tabs[page] = tab
 
         # Track modification — reads tab.remote_path so renamed/saved tabs show correct name
         def on_modified_changed(_buf):
             name = os.path.basename(tab.remote_path)
-            if buf.get_modified():
-                tab_label.set_markup(f"<b>* {name}</b>")
-                tab.modified = True
-            else:
-                tab_label.set_text(name)
-                tab.modified = False
+            tab.modified = buf.get_modified()
+            page.set_title(f"* {name}" if tab.modified else name)
 
         buf.connect('modified-changed', on_modified_changed)
 
         # Signature help popover — shows function signature under the cursor
         self._sighelp_attach(view, buf)
-
-        # Close button — find the current page_num dynamically, not from closure.
-        # The X handler logs unconditionally and falls back to scanning
-        # self.tabs by identity if the notebook lookup misses, so we can see
-        # what happened when a close click appears to do nothing.
-        def on_close(_btn):
-            scroll_widget = tab.source_view.get_parent()
-            current_page = self.notebook.page_num(scroll_widget) if scroll_widget else -1
-            self._console_log(
-                f"Tab X clicked: '{os.path.basename(tab.remote_path)}' "
-                f"page_num={current_page}", 'timestamp')
-            if current_page < 0:
-                for pn, t in list(self.tabs.items()):
-                    if t is tab:
-                        current_page = pn
-                        break
-                if current_page >= 0:
-                    self._console_log(
-                        f"Tab X fallback: located tab by self.tabs scan at "
-                        f"page_num={current_page}", 'error')
-            if current_page >= 0:
-                self._close_tab(current_page)
-            else:
-                self._console_log(
-                    f"Tab X close failed — tab "
-                    f"'{os.path.basename(tab.remote_path)}' not found "
-                    f"in notebook or self.tabs", 'error')
-
-        close_btn.connect('clicked', on_close)
 
         if tab.highlight_suppressed:
             longest = max_line_length(content)
@@ -363,186 +313,167 @@ class EditorMixin:
             return lang_mgr.get_language(lang_id)
         return None
 
-    def _close_tab(self, page_num, callback=None):
+    def _add_welcome_tab(self):
+        """Add the placeholder tab shown when no files are open. Pinned so
+        Adw.TabBar gives it no close button — the old plain-Label tab had
+        no close affordance either. Shared by window.py's initial
+        _build_ui() and _on_tab_close_page() below (last tab closed)."""
+        welcome = Gtk.Label(
+            label="Connect to an FTP/SFTP server and open a file to start editing.")
+        welcome.set_margin_top(40)
+        page = self.notebook.append(welcome)
+        page.set_title("Welcome")
+        self.notebook.set_page_pinned(page, True)
+        return page
+
+    def _close_tab(self, page, callback=None):
         """Close a tab; if modified, confirm first ("Unsaved Changes" ->
         Yes/No). `callback` (if given) is invoked exactly once once the
         decision is resolved — whether the tab was actually closed or the
         close was declined — so callers that process several tabs in
         sequence (`_close_all_tabs`, `_close_all_tabs_except`) can chain
-        through it. GTK4 has no blocking dialog API, so the old
-        synchronous "ask, then maybe proceed" shape becomes this
-        callback-driven continuation; the decision logic itself (Yes ->
-        close, anything else -> don't) is unchanged. See the module
-        docstring for why this is a plain Gtk.Window rather than
-        Adw.AlertDialog."""
-        tab = self.tabs.get(page_num)
-        self._debug(f"_close_tab: page_num={page_num}, tab={'found: ' + os.path.basename(tab.remote_path) if tab else 'NOT FOUND'}, tabs={list(self.tabs.keys())}")
+        through it.
+
+        GTK4: `page` is now an Adw.TabPage, not an integer page number —
+        see the module docstring. Closing itself is delegated to
+        Adw.TabView.close_page(), which raises the 'close-page' signal
+        (_on_tab_close_page, in window.py) synchronously; that's where the
+        actual Yes/No confirmation and removal now live, so this method
+        just registers the continuation and kicks the close off. The
+        `page not in self.tabs` early-out preserves the old "close a page
+        that's already gone" no-op instead of raising into TabView."""
+        tab = self.tabs.get(page)
+        self._debug(f"_close_tab: tab={'found: ' + os.path.basename(tab.remote_path) if tab else 'NOT FOUND'}, open tabs={len(self.tabs)}")
         if not tab:
             if callback:
                 callback()
             return
-
-        if tab.modified:
-            win = Gtk.Window(title="Unsaved Changes", transient_for=self, modal=True)
-            win.set_default_size(360, -1)
-
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-            box.set_margin_start(12)
-            box.set_margin_end(12)
-            box.set_margin_top(12)
-            box.set_margin_bottom(12)
-            win.set_child(box)
-
-            label = Gtk.Label(
-                label=f"'{os.path.basename(tab.remote_path)}' has unsaved "
-                      f"changes. Close anyway?",
-                wrap=True, halign=Gtk.Align.START)
-            box.append(label)
-
-            resolved = [False]
-
-            def resolve(do_close):
-                # Guards against being invoked twice — a button click calls
-                # finish() which both resolves and win.close()s, and that
-                # close() itself raises 'close-request', whose handler also
-                # calls resolve().
-                if resolved[0]:
-                    return
-                resolved[0] = True
-                if do_close:
-                    self._do_close_tab(page_num)
-                if callback:
-                    callback()
-
-            def finish(do_close):
-                resolve(do_close)
-                win.close()
-
-            # ButtonsType.YES_NO rendered as [No, Yes] left-to-right in GTK3.
-            btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            btn_row.set_halign(Gtk.Align.END)
-            btn_no = Gtk.Button(label="No")
-            btn_no.connect('clicked', lambda _b: finish(False))
-            btn_yes = Gtk.Button(label="Yes")
-            btn_yes.add_css_class('suggested-action')
-            btn_yes.connect('clicked', lambda _b: finish(True))
-            btn_row.append(btn_no)
-            btn_row.append(btn_yes)
-            box.append(btn_row)
-
-            # A bare Gtk.Window has no built-in Escape-to-close behavior
-            # (unlike Gtk.Dialog) — wire it explicitly to the same "don't
-            # close" path the No button takes.
-            def on_key(_ctrl, keyval, _keycode, _state):
-                if keyval == Gdk.KEY_Escape:
-                    finish(False)
-                    return True
-                return False
-            key_ctrl = Gtk.EventControllerKey()
-            key_ctrl.connect('key-pressed', on_key)
-            win.add_controller(key_ctrl)
-
-            # Titlebar close/Alt-F4/destroyed transient parent all raise
-            # 'close-request' without going through No/Yes/Escape — resolve
-            # as "don't close" (same as No) so callback still fires exactly
-            # once, and let default handling actually tear the window down.
-            def on_close_request(_win):
-                resolve(False)
-                return False
-            win.connect('close-request', on_close_request)
-
-            win.present()
-            return
-
-        self._do_close_tab(page_num)
         if callback:
-            callback()
+            self._pending_close_callbacks[page] = callback
+        self.notebook.close_page(page)
 
-    def _do_close_tab(self, page_num):
-        """Actually remove a tab's page and clean up bookkeeping — the part
-        of the old synchronous _close_tab that ran unconditionally once
-        past the (now-async) unsaved-changes confirmation."""
-        tab = self.tabs.get(page_num)
+    # -- Tab close / context menu (Adw.TabView signals) -----------------------
+
+    def _on_tab_close_page(self, view, page):
+        """Central close handler for every close path: Adw.TabBar's
+        built-in close button, the tab context menu's Close/Close All/
+        Close All But This, and _close_tab()'s Ctrl+W caller — all of them
+        end up at Adw.TabView.close_page(), which raises this signal.
+        Returning True means we take responsibility for eventually calling
+        close_page_finish() ourselves: synchronously for an unknown page
+        (e.g. the pinned Welcome tab, never added to self.tabs) or an
+        unmodified one, asynchronously once the confirm window below
+        resolves for a modified one. This, plus TabPage being a stable
+        object identity across reorders, is what let _reindex_tabs() and
+        the page-reordered handler be deleted outright rather than ported
+        — see the module docstring."""
+        tab = self.tabs.get(page)
         if not tab:
-            return
-        self.notebook.remove_page(page_num)
-        del self.tabs[page_num]
-        # Re-index tabs after removal
-        self._reindex_tabs()
-
-        if self.notebook.get_n_pages() == 0:
-            welcome = Gtk.Label(label="Connect to an FTP/SFTP server and open a file to start editing.")
-            welcome.set_margin_top(40)
-            self.notebook.append_page(welcome, Gtk.Label(label="Welcome"))
-
-    def _setup_tab_reordering(self):
-        # Tabs are reorderable (set_tab_reorderable in add_tab). self.tabs is
-        # keyed by page index, so a drag must re-sync it or save/close resolve
-        # the wrong tab by stale index. _reindex_tabs rebuilds it by widget id.
-        self.notebook.connect('page-reordered',
-                               lambda *_a: self._reindex_tabs())
-
-    def _reindex_tabs(self):
-        new_tabs = {}
-        for i in range(self.notebook.get_n_pages()):
-            widget = self.notebook.get_nth_page(i)
-            for old_num, tab in list(self.tabs.items()):
-                scroll = tab.source_view.get_parent()
-                if scroll is widget:
-                    new_tabs[i] = tab
-                    break
-        self._debug(f"_reindex_tabs: {list(self.tabs.keys())} -> {list(new_tabs.keys())}")
-        self.tabs = new_tabs
-
-    # -- Tab Context Menu -----------------------------------------------------
-
-    def _tab_ctx_ensure_popover(self, widget):
-        """Lazily create the tab context-menu popover and (re-)anchor it to
-        `widget` (whichever tab's label Box was clicked). GTK4 popovers
-        hold exactly one parent: unparent before re-parenting."""
-        if getattr(self, '_tab_ctx_popover', None) is None:
-            self._tab_ctx_popover = Gtk.PopoverMenu()
-        pop = self._tab_ctx_popover
-        if pop.get_parent() is not widget:
-            if pop.get_parent() is not None:
-                pop.unparent()
-            pop.set_parent(widget)
-        return pop
-
-    def _on_tab_right_click(self, gesture, n_press, x, y):
-        """Right-click → context menu; middle-click → close tab.
-
-        Middle-click acts as an always-available escape hatch when the X
-        button is unreachable (e.g. captured by a stuck popover).
-
-        GTK4: Gtk.Menu/Gtk.MenuItem -> Gio.Menu model + Gtk.PopoverMenu,
-        actions via Gio.SimpleAction, same pattern as local_files.py's/
-        remote.py's tree context menus. The GestureClick is attached
-        directly to tab_box (the old EventBox wrapper is gone)."""
-        widget = gesture.get_widget()
-        button = gesture.get_current_button()
-        if button not in (2, 3):
-            return False
-
-        # Find which page this tab belongs to
-        clicked_page = None
-        for i in range(self.notebook.get_n_pages()):
-            page_widget = self.notebook.get_nth_page(i)
-            tab_widget = self.notebook.get_tab_label(page_widget)
-            if tab_widget is widget:
-                clicked_page = i
-                break
-        if clicked_page is None or clicked_page not in self.tabs:
-            return False
-
-        if button == 2:
-            self._console_log(
-                f"Tab middle-click close: page_num={clicked_page}",
-                'timestamp')
-            self._close_tab(clicked_page)
+            view.close_page_finish(page, True)
             return True
 
-        tab = self.tabs[clicked_page]
+        def finish(do_close):
+            if do_close:
+                del self.tabs[page]
+            view.close_page_finish(page, do_close)
+            if do_close and view.get_n_pages() == 0:
+                self._add_welcome_tab()
+            cb = self._pending_close_callbacks.pop(page, None)
+            if cb:
+                cb()
+
+        if not tab.modified:
+            finish(True)
+            return True
+
+        # Modified — confirm before discarding changes. See module
+        # docstring for why this is a plain Gtk.Window with explicit
+        # buttons rather than Adw.AlertDialog.
+        win = Gtk.Window(title="Unsaved Changes", transient_for=self, modal=True)
+        win.set_default_size(360, -1)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        win.set_child(box)
+
+        label = Gtk.Label(
+            label=f"'{os.path.basename(tab.remote_path)}' has unsaved "
+                  f"changes. Close anyway?",
+            wrap=True, halign=Gtk.Align.START)
+        box.append(label)
+
+        resolved = [False]
+
+        def resolve(do_close):
+            # Guards against being invoked twice — a button click calls
+            # finish_and_close_window() which both resolves and win.close()s,
+            # and that close() itself raises 'close-request', whose handler
+            # also calls resolve().
+            if resolved[0]:
+                return
+            resolved[0] = True
+            finish(do_close)
+
+        def finish_and_close_window(do_close):
+            resolve(do_close)
+            win.close()
+
+        # ButtonsType.YES_NO rendered as [No, Yes] left-to-right in GTK3.
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_row.set_halign(Gtk.Align.END)
+        btn_no = Gtk.Button(label="No")
+        btn_no.connect('clicked', lambda _b: finish_and_close_window(False))
+        btn_yes = Gtk.Button(label="Yes")
+        btn_yes.add_css_class('suggested-action')
+        btn_yes.connect('clicked', lambda _b: finish_and_close_window(True))
+        btn_row.append(btn_no)
+        btn_row.append(btn_yes)
+        box.append(btn_row)
+
+        # A bare Gtk.Window has no built-in Escape-to-close behavior
+        # (unlike Gtk.Dialog) — wire it explicitly to the same "don't
+        # close" path the No button takes.
+        def on_key(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                finish_and_close_window(False)
+                return True
+            return False
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect('key-pressed', on_key)
+        win.add_controller(key_ctrl)
+
+        # Titlebar close/Alt-F4/destroyed transient parent all raise
+        # 'close-request' without going through No/Yes/Escape — resolve
+        # as "don't close" (same as No) so callback still fires exactly
+        # once, and let default handling actually tear the window down.
+        def on_close_request(_win):
+            resolve(False)
+            return False
+        win.connect('close-request', on_close_request)
+
+        win.present()
+        return True
+
+    def _on_tab_setup_menu(self, _view, page):
+        """Built-in Adw.TabView context menu (right-click on a tab), set up
+        fresh each time it's about to open. `page` is None when the menu is
+        closing.
+
+        GTK4: Gtk.Menu/Gtk.MenuItem -> Gio.Menu model + Gio.SimpleAction,
+        same pattern as local_files.py's/remote.py's tree context menus —
+        the difference is Adw.TabView owns the popover itself (via
+        set_menu_model()/'setup-menu'), so there's no manual
+        Gtk.PopoverMenu or right-click gesture to wire up here. Native
+        middle-click-to-close and the tab drag-reorder are both handled by
+        Adw.TabBar without any code on our side."""
+        if page is None:
+            return
+        tab = self.tabs.get(page)
+        if not tab:
+            return
         reload_label = "Reload from Disk" if tab.is_local else "Reload from Server"
 
         menu = Gio.Menu()
@@ -570,24 +501,14 @@ class EditorMixin:
         menu.append_section(None, sec1)
 
         sec2 = Gio.Menu()
-        add_action(sec2, 'close', "Close", lambda: self._close_tab(clicked_page))
+        add_action(sec2, 'close', "Close", lambda: self._close_tab(page))
         add_action(sec2, 'close_all', "Close All", lambda: self._close_all_tabs())
         add_action(sec2, 'close_others', "Close All But This",
-                   lambda: self._close_all_tabs_except(clicked_page))
+                   lambda: self._close_all_tabs_except(page))
         menu.append_section(None, sec2)
 
-        popover = self._tab_ctx_ensure_popover(widget)
-        popover.set_menu_model(menu)
-        widget.insert_action_group('tabctx', group)
-
-        rect = Gdk.Rectangle()
-        rect.x = int(x)
-        rect.y = int(y)
-        rect.width = 1
-        rect.height = 1
-        popover.set_pointing_to(rect)
-        popover.popup()
-        return True
+        self.notebook.set_menu_model(menu)
+        self.notebook.insert_action_group('tabctx', group)
 
     def _force_highlight(self, tab):
         """Turn syntax highlighting on for a tab where a long line suppressed it.
@@ -644,35 +565,37 @@ class EditorMixin:
     def _close_all_tabs(self):
         """Close all open tabs, confirming per modified tab.
 
-        GTK4 has no blocking confirm dialog, so this walks the same
-        precomputed reverse-page-order queue the old synchronous loop used,
-        but one tab at a time — each tab's _close_tab confirmation
-        continuation advances to the next. Removing a higher page_num never
-        renumbers the lower ones still queued, so precomputing the list up
-        front (rather than re-reading self.tabs.keys() at each step) is
-        still safe."""
-        self._close_tab_chain(sorted(self.tabs.keys(), reverse=True))
+        GTK4 has no blocking confirm dialog, so this walks a precomputed
+        queue (rightmost tab first, matching the old reverse-page-number
+        order) one tab at a time — each tab's _close_tab confirmation
+        continuation advances to the next. Adw.TabPage keys stay valid
+        regardless of what order they're removed in (unlike the old
+        integer page scheme), so precomputing the list up front is
+        safe here for the same reason _reindex_tabs is no longer needed
+        at all — see the module docstring."""
+        pages = sorted(self.tabs.keys(), key=self.notebook.get_page_position, reverse=True)
+        self._close_tab_chain(pages)
 
     def _close_all_tabs_except(self, keep_page):
-        """Close all tabs except the given page number. See
-        _close_all_tabs for why this is now a queued async chain instead
-        of a synchronous loop."""
+        """Close all tabs except the given page. See _close_all_tabs for
+        why this is now a queued async chain instead of a synchronous loop."""
         keep_tab = self.tabs.get(keep_page)
         if not keep_tab:
             return
         keep_path = keep_tab.remote_path
-        queue = [pn for pn in sorted(self.tabs.keys(), reverse=True)
-                 if self.tabs.get(pn) and self.tabs[pn].remote_path != keep_path]
+        pages = sorted(self.tabs.keys(), key=self.notebook.get_page_position, reverse=True)
+        queue = [p for p in pages
+                 if self.tabs.get(p) and self.tabs[p].remote_path != keep_path]
         self._close_tab_chain(queue)
 
     def _close_tab_chain(self, queue):
-        """Close tabs in `queue` (page numbers, highest first) one at a
+        """Close tabs in `queue` (Adw.TabPages, rightmost first) one at a
         time, waiting for each one's unsaved-changes confirmation to
         resolve before moving on to the next."""
         if not queue:
             return
-        page_num, rest = queue[0], queue[1:]
-        self._close_tab(page_num, callback=lambda: self._close_tab_chain(rest))
+        page, rest = queue[0], queue[1:]
+        self._close_tab(page, callback=lambda: self._close_tab_chain(rest))
 
     # -- Reload tab contents --------------------------------------------------
 
@@ -869,9 +792,9 @@ class EditorMixin:
     def _open_local_file(self, filepath):
         """Open a local file in an editor tab."""
         # Check if already open
-        for page_num, tab in self.tabs.items():
+        for page, tab in self.tabs.items():
             if tab.is_local and tab.local_path == filepath:
-                self.notebook.set_current_page(page_num)
+                self.notebook.set_selected_page(page)
                 return
 
         try:
@@ -887,36 +810,21 @@ class EditorMixin:
     # -- Save (local or remote) -----------------------------------------------
 
     def _update_tab_label(self, tab, new_name):
-        """Update the tab label text for a given tab."""
+        """Update the tab label text for a given tab.
+
+        GTK4: Adw.TabPage.set_title() replaces the old widget-tree walk to
+        find the tab's Gtk.Label — the title now lives on the TabPage
+        itself, not a hand-built tab_box, so there's nothing left to walk."""
         page_widget = tab.source_view.get_parent()  # ScrolledWindow
-        tab_widget = self.notebook.get_tab_label(page_widget)  # tab_box
-        if not tab_widget:
+        page = self.notebook.get_page(page_widget) if page_widget else None
+        if page is None:
             return
-
-        # Walk the widget tree looking for the Gtk.Label. GTK4 containers
-        # have no get_children() — walk via get_first_child()/get_next_sibling().
-        def _find_label(widget):
-            if isinstance(widget, Gtk.Label):
-                return widget
-            child = widget.get_first_child()
-            while child is not None:
-                found = _find_label(child)
-                if found:
-                    return found
-                child = child.get_next_sibling()
-            return None
-
-        label = _find_label(tab_widget)
-        if label:
-            if tab.modified:
-                label.set_markup(f"<b>* {new_name}</b>")
-            else:
-                label.set_text(new_name)
+        page.set_title(f"* {new_name}" if tab.modified else new_name)
 
     def _on_save(self, _btn):
         """Save the current file — locally or via upload depending on type."""
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if not tab:
             self._set_status("No file open to save")
             return
@@ -987,8 +895,8 @@ class EditorMixin:
     # -- Save & Upload --------------------------------------------------------
 
     def _on_save_upload(self, _btn):
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if not tab:
             self._set_status("No file open to save")
             return
@@ -1030,7 +938,7 @@ class EditorMixin:
                 self.ftp_mgr = None
                 self.current_server_guid = ''
             # Store pending upload info, then connect
-            self._pending_upload = (tab, page_num, max_mb)
+            self._pending_upload = (tab, page, max_mb)
             vals = dict(srv)
             stored_pwd = secrets_store.get_password(srv['guid'])
             if stored_pwd is not None:
@@ -1078,7 +986,7 @@ class EditorMixin:
             if tab_guid:
                 srv = find_server_by_guid(self.config, tab_guid)
                 if srv:
-                    self._pending_upload = (tab, page_num, max_mb)
+                    self._pending_upload = (tab, page, max_mb)
                     vals = dict(srv)
                     stored_pwd = secrets_store.get_password(srv['guid'])
                     if stored_pwd is not None:
@@ -1116,9 +1024,9 @@ class EditorMixin:
             return
 
         # Connected to the right server — upload directly
-        self._do_upload(tab, page_num, max_mb)
+        self._do_upload(tab, page, max_mb)
 
-    def _do_upload(self, tab, page_num, max_mb):
+    def _do_upload(self, tab, page, max_mb):
         """Upload the file (local temp already written). Must be called on main thread."""
         if not self.ftp_mgr or not self.ftp_mgr.connected:
             self._show_error("Not Connected", "Connection lost. Try saving again.")
@@ -1349,7 +1257,7 @@ class EditorMixin:
                             def _show_compare():
                                 self._show_conflict_diff(
                                     tab, local_content, remote_content,
-                                    page_num, max_mb, mgr)
+                                    page, max_mb, mgr)
                                 self.item_save.set_sensitive(True)
                             GLib.idle_add(_show_compare)
                         else:
@@ -1366,7 +1274,7 @@ class EditorMixin:
                 # Hash the uploaded content
                 with open(tab.local_path, 'rb') as f:
                     tab.remote_hash = hashlib.sha256(f.read()).hexdigest()
-                GLib.idle_add(self._on_upload_done, tab, page_num)
+                GLib.idle_add(self._on_upload_done, tab, page)
             except Exception as e:
                 GLib.idle_add(self._on_upload_failed, f"{type(e).__name__}: {e}")
 
@@ -1393,11 +1301,11 @@ class EditorMixin:
         # Perform the pending upload FIRST, then reload tree
         # (both use the SFTP connection which is not thread-safe)
         if self._pending_upload:
-            tab, page_num, max_mb = self._pending_upload
+            tab, page, max_mb = self._pending_upload
             self._pending_upload = None
             # Upload, and reload tree to the file's directory after upload completes
             self._pending_tree_reload = (vals, tab.remote_path)
-            self._do_upload(tab, page_num, max_mb)
+            self._do_upload(tab, page, max_mb)
         else:
             # No pending upload — just reload tree
             start_dir = vals.get('home_directory', '').strip()
@@ -1406,7 +1314,7 @@ class EditorMixin:
             if start_dir:
                 self._load_tree(start_dir)
 
-    def _on_upload_done(self, tab, page_num):
+    def _on_upload_done(self, tab, page):
         tab.buffer.set_modified(False)
         self.item_save.set_sensitive(True)
         size_kb = os.path.getsize(tab.local_path) / 1024
@@ -1569,8 +1477,8 @@ class EditorMixin:
             self._search_window.present()
 
         # Pre-fill with selected text
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if tab:
             buf = tab.buffer
             if buf.get_has_selection():
@@ -1608,8 +1516,8 @@ class EditorMixin:
                 '<span foreground="red">No matches</span>')
         else:
             # Find which match the cursor is on
-            page_num = self.notebook.get_current_page()
-            tab = self.tabs.get(page_num)
+            page = self.notebook.get_selected_page()
+            tab = self.tabs.get(page)
             if tab:
                 cursor = tab.buffer.get_iter_at_mark(tab.buffer.get_insert())
                 pos = self._search_context.get_occurrence_position(
@@ -1626,8 +1534,8 @@ class EditorMixin:
         if not self._search_window:
             return
         self._apply_search_settings()
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if tab and not self._search_context:
             self._setup_search_context(tab)
         if self._search_context:
@@ -1642,8 +1550,8 @@ class EditorMixin:
     def _on_search_next(self, *_args):
         """Find next match."""
         self._apply_search_settings()
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if not tab or not self._search_context:
             return
         # Search from END of current selection so we advance to the next match
@@ -1661,8 +1569,8 @@ class EditorMixin:
     def _on_search_prev(self, *_args):
         """Find previous match."""
         self._apply_search_settings()
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if not tab or not self._search_context:
             return
         # Search from START of current selection so we go to the previous match
@@ -1680,8 +1588,8 @@ class EditorMixin:
     def _on_replace_one(self, *_args):
         """Replace the current match and move to next."""
         self._apply_search_settings()
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if not tab or not self._search_context:
             return
         buf = tab.buffer
@@ -1717,8 +1625,8 @@ class EditorMixin:
             self._search_window.destroy()
             self._search_window = None
         # Return focus to editor
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if tab:
             tab.source_view.grab_focus()
 
@@ -1726,8 +1634,8 @@ class EditorMixin:
 
     def _on_pretty_print_json(self):
         """Pretty print the current buffer as JSON."""
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if not tab:
             return
         buf = tab.buffer
@@ -1752,8 +1660,8 @@ class EditorMixin:
 
     def _on_pretty_print_xml(self):
         """Pretty print the current buffer as XML."""
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if not tab:
             return
         buf = tab.buffer
@@ -1789,8 +1697,8 @@ class EditorMixin:
         Escape handling (this dialog has no Cancel button either, per the
         migration plan's dialog shapes for custom content — closing it any
         way just does nothing, same as before)."""
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if not tab:
             return
 
@@ -1901,8 +1809,8 @@ class EditorMixin:
         indent = line_text[:len(line_text) - len(line_text.lstrip())]
 
         # Get the file extension to determine language
-        page_num = self.notebook.get_current_page()
-        tab = self.tabs.get(page_num)
+        page = self.notebook.get_selected_page()
+        tab = self.tabs.get(page)
         if not tab:
             return False
         ext = self._get_file_ext(tab.remote_path)

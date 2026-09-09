@@ -74,7 +74,13 @@ class CompareMixin:
         combo_b = Gtk.ComboBoxText()
         grid.attach(combo_b, 1, 1, 1, 1)
 
-        for page_num, tab in sorted(self.tabs.items()):
+        # Adw.TabView addresses tabs by TabPage object, not integer index,
+        # so Gtk.ComboBoxText (which needs string ids) gets a synthetic
+        # per-dialog id instead of str(page_num); tabs_by_id below maps
+        # back to the real TabPage on resolution.
+        tabs_by_id = {}
+        for i, (page, tab) in enumerate(
+                sorted(self.tabs.items(), key=lambda kv: self.notebook.get_page_position(kv[0]))):
             filename = os.path.basename(tab.remote_path)
             if tab.is_local:
                 parent = os.path.dirname(tab.remote_path)
@@ -84,12 +90,16 @@ class CompareMixin:
                 srv_name = srv['name'] if srv else 'unknown'
                 parent = os.path.dirname(tab.remote_path)
                 label = f"{filename}  ({srv_name}:{parent})"
-            combo_a.append(str(page_num), label)
-            combo_b.append(str(page_num), label)
+            cid = str(i)
+            tabs_by_id[cid] = page
+            combo_a.append(cid, label)
+            combo_b.append(cid, label)
 
         # Pre-select current tab as left
-        current = self.notebook.get_current_page()
-        combo_a.set_active_id(str(current))
+        current_page = self.notebook.get_selected_page()
+        current_id = next((cid for cid, p in tabs_by_id.items() if p is current_page), None)
+        if current_id is not None:
+            combo_a.set_active_id(current_id)
 
         box.append(grid)
 
@@ -110,8 +120,8 @@ class CompareMixin:
                 if id_a == id_b:
                     self._show_error("Compare", "Please select two different tabs.")
                     return
-                tab_a = self.tabs.get(int(id_a))
-                tab_b = self.tabs.get(int(id_b))
+                tab_a = self.tabs.get(tabs_by_id.get(id_a))
+                tab_b = self.tabs.get(tabs_by_id.get(id_b))
                 if tab_a and tab_b:
                     self._show_diff(tab_a, tab_b)
             else:
@@ -512,7 +522,7 @@ class CompareMixin:
         GLib.timeout_add(500, _init_minimap)
 
     def _show_conflict_diff(self, tab, local_content, remote_content,
-                            page_num, max_mb, mgr):
+                            page, max_mb, mgr):
         """Show a diff between local changes and server version with action buttons."""
         import difflib
 
@@ -705,7 +715,7 @@ class CompareMixin:
                     tab.remote_size = mgr.get_remote_size(tab.remote_path)
                     with open(tab.local_path, 'rb') as f:
                         tab.remote_hash = hashlib.sha256(f.read()).hexdigest()
-                    GLib.idle_add(self._on_upload_done, tab, page_num)
+                    GLib.idle_add(self._on_upload_done, tab, page)
                 except Exception as e:
                     GLib.idle_add(self._on_upload_failed, str(e))
             threading.Thread(target=_upload, daemon=True).start()

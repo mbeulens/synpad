@@ -129,9 +129,13 @@ class FakeHeader:
 
 
 class FakeNotebook:
+    """Stands in for the real Adw.TabView — remote.py addresses tabs by
+    TabPage now (Task 5's Gtk.Notebook -> Adw.TabView conversion), so this
+    fake's "page" is just an opaque token, matching get_selected_page()/
+    set_selected_page()'s real signatures (no integer index anywhere)."""
     def __init__(self, current=0): self._current = current
-    def get_current_page(self): return self._current
-    def set_current_page(self, n): self._current = n
+    def get_selected_page(self): return self._current
+    def set_selected_page(self, p): self._current = p
 
 
 class FakeFtpMgr:
