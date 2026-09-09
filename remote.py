@@ -7,16 +7,27 @@ GTK4 notes:
   task-2-report.md`, "Async dialog API for downstream tasks" —
   `ConnectDialog` is driven from two call sites, this module's `_on_connect`
   being the second) — no second dialog pattern invented here.
-- `_ask_name` and `_confirm_delete` are called *synchronously* (blocking
-  return value) not only by this module's own tree handlers but also by
-  the already-ported `local_files.py` (`_on_local_new_file`,
-  `_on_local_new_dir`, `_on_local_rename`, `_on_local_delete`), which this
-  task may not modify. GTK4 has no synchronous alert/dialog API at all
-  (`Gtk.Dialog.run()` is gone; `Adw.AlertDialog.choose()` is async-only),
-  so both methods keep their exact old synchronous signature and return
-  value by pumping a private `GLib.MainLoop` until the dialog resolves —
-  the same recursive-mainloop technique `Gtk.Dialog.run()` used internally
-  under GTK3. Every other caller (in this module) is therefore unchanged.
+- `_ask_name` and `_confirm_delete` are called not only by this module's
+  own tree handlers but also by `local_files.py` (`_on_local_new_file`,
+  `_on_local_new_dir`, `_on_local_rename`, `_on_local_delete`). Both were
+  originally kept *synchronous* via a private `GLib.MainLoop` pumped until
+  the dialog resolved, mirroring `Gtk.Dialog.run()`'s old blocking
+  contract — that was reviewed and rejected (see the "Fix round 1" section
+  appended to `task-3-report.md`): a plain `Gtk.Window` has no
+  `close-request` handler by default, so closing the window via its own
+  titlebar, Alt-F4, or a destroyed transient parent never called
+  `finish()`, and the app froze with the mainloop never returning; on this
+  GTK/libadwaita stack `Adw.AlertDialog`'s own Escape/close handling
+  additionally never invokes the `choose()` callback at all when its
+  parent is a plain `Gtk.Window` (verified independently of any SynPad
+  code) — an unconditional freeze under the nested loop, since
+  `loop.quit()` would then never run. Both methods are now plain
+  async/callback-based instead (`callback(name_or_None)` /
+  `callback(confirmed_bool)`), matching `_show_permissions_dialog`'s and
+  `_on_compare_tabs`'s shape — every caller in both this module and
+  `local_files.py` was updated to the callback form (Global Constraint 5
+  was explicitly lifted for `local_files.py`'s four call sites by the
+  controller for this fix).
 - The tree right-click context menu and the quick-connect menu convert
   `Gtk.Menu`/`Gtk.MenuItem` to `Gio.Menu` + actions, following
   `local_files.py`'s established pattern; the quick-connect menu attaches
@@ -95,12 +106,17 @@ class RemoteMixin:
         # of them (matches the old flat sequence of submenu MenuItems).
         if groups:
             sec_groups = Gio.Menu()
-            for group_name in sorted(groups.keys()):
+            # Index the group by its position in the sorted list rather
+            # than sanitising its name into the action name: two
+            # differently-named groups (e.g. "A B" and "A-B") sanitise to
+            # the same string, which would make add_action() silently
+            # overwrite one group's actions with the other's and connect
+            # a menu entry to the wrong server's guid.
+            for group_idx, group_name in enumerate(sorted(groups.keys())):
                 submenu = Gio.Menu()
                 for i, srv in enumerate(groups[group_name]):
                     label = f"{srv['name']} ({srv.get('protocol','sftp').upper()})"
-                    safe = ''.join(c if c.isalnum() else '_' for c in group_name)
-                    add_action(submenu, f'connect_g{safe}_{i}', label, srv['guid'])
+                    add_action(submenu, f'connect_g{group_idx}_{i}', label, srv['guid'])
                 sec_groups.append_submenu(group_name, submenu)
             menu.append_section(None, sec_groups)
 
@@ -557,22 +573,35 @@ class RemoteMixin:
         popover.popup()
         return True
 
-    def _ask_name(self, title, prompt, default_value='', ok_label='Create'):
-        """Show a simple dialog asking for a name. Returns name or None.
+    def _ask_name(self, title, prompt, callback, default_value='', ok_label='Create'):
+        """Show a simple dialog asking for a name.
 
-        GTK4: `Gtk.Dialog.run()` no longer exists at all, but this method
-        is called synchronously — for its blocking return value — by both
-        this module's own tree handlers and by the already-ported
-        local_files.py (which this task may not modify), so the old
-        synchronous contract must survive exactly. This rebuilds the
-        dialog as a plain Gtk.Window with explicit buttons (custom
-        content, per the migration plan's dialog shape) and recovers the
-        blocking return value by pumping a private GLib.MainLoop until a
-        button (or Escape) resolves it — the same recursive-mainloop
-        technique GTK's own Gtk.Dialog.run() used internally under GTK3.
-        Decision logic is unchanged: Cancel, Escape, or an empty entry all
-        resolve to None; a non-empty name on Create/Rename resolves to
-        that name."""
+        Calls `callback(name)` exactly once, with the entered (stripped,
+        non-empty) name, or `callback(None)` if cancelled, confirmed with
+        an empty/whitespace-only entry, or closed via Escape, the
+        titlebar's own close control, Alt-F4, or the transient parent
+        being destroyed.
+
+        GTK4: `Gtk.Dialog.run()` no longer exists at all, so this is a
+        plain Gtk.Window with explicit buttons (custom content, per the
+        migration plan's dialog shape), driven by this callback instead of
+        a blocking return value. An earlier version of this method kept
+        the old synchronous return-value contract by pumping a private
+        GLib.MainLoop — that was reverted after review: a bare Gtk.Window
+        has no `close-request` handler by default, so closing it via its
+        own titlebar/Alt-F4/a destroyed transient parent never reached
+        `finish()`, and `loop.run()` never returned — a guaranteed freeze,
+        reachable from every one of this method's nine call sites. This
+        version instead resolves via `close-request` explicitly (see
+        `on_close_request` below) in addition to Cancel/OK/Escape, and a
+        `resolved` guard makes calling the callback more than once for a
+        single dialog impossible regardless of which path fires first.
+        Decision logic is unchanged: Cancel, Escape, closing the window
+        outright, or an empty entry all resolve to None; a non-empty name
+        on Create/Rename resolves to that name. Every caller — in this
+        module and in local_files.py — was updated to this callback shape
+        (Global Constraint 5 lifted for local_files.py's four call sites
+        by the controller for this fix)."""
         win = Gtk.Window(title=title, transient_for=self, modal=True)
         win.set_default_size(300, -1)
 
@@ -591,16 +620,26 @@ class RemoteMixin:
             entry.select_region(0, -1)
         box.append(entry)
 
-        loop = GLib.MainLoop()
-        result = {'name': None}
+        resolved = [False]
+
+        def resolve(name):
+            # Guards against being invoked twice for one dialog — e.g.
+            # finish() closes the window itself, which raises
+            # 'close-request', whose handler also calls resolve(); without
+            # this guard the callback would fire a second time.
+            if resolved[0]:
+                return
+            resolved[0] = True
+            callback(name)
 
         def finish(accepted):
+            name = None
             if accepted:
                 typed = entry.get_text().strip()
                 if typed:
-                    result['name'] = typed
+                    name = typed
+            resolve(name)
             win.close()
-            loop.quit()
 
         entry.connect('activate', lambda _e: finish(True))
 
@@ -632,23 +671,50 @@ class RemoteMixin:
         key_ctrl.connect('key-pressed', on_key)
         win.add_controller(key_ctrl)
 
-        win.present()
-        loop.run()
-        return result['name']
+        # Closing via the titlebar's own close control, Alt-F4, or the
+        # transient parent being destroyed all raise 'close-request'
+        # without going through Cancel/OK/Escape — a bare Gtk.Window has
+        # no other hook for this. Resolve as cancelled (None) so the
+        # caller's callback still fires exactly once, and let the default
+        # handling actually tear the window down (return False) rather
+        # than calling win.close() ourselves from inside its own
+        # close-request handling.
+        def on_close_request(_win):
+            resolve(None)
+            return False
 
-    def _confirm_delete(self, what):
-        """Ask for confirmation before deleting. Returns True if confirmed.
+        win.connect('close-request', on_close_request)
+
+        win.present()
+
+    def _confirm_delete(self, what, callback):
+        """Ask for confirmation before deleting.
+
+        Calls `callback(True)` if the user confirms ('Yes'), or
+        `callback(False)` if they choose 'No'.
 
         GTK4: a genuine heading/body/Yes-No confirm, so per the migration
-        plan's dialog shapes this uses Adw.AlertDialog — but this method
-        is called synchronously for its True/False return by both this
-        module's own delete handlers and by the already-ported
-        local_files.py's `_on_local_delete` (which this task may not
-        modify). Adw.AlertDialog.choose() is async-only in GTK4 (there is
-        no synchronous alternative), so the old blocking-return contract
-        is recovered the same way as _ask_name above: a private
-        GLib.MainLoop pumped until the user responds. Decision logic
-        (True only on 'Yes') is unchanged."""
+        plan's dialog shapes this uses Adw.AlertDialog, driven by this
+        callback instead of a blocking return value. An earlier version
+        kept the old synchronous return-value contract by pumping a
+        private GLib.MainLoop — that was reverted after review: verified
+        independently of any SynPad code, with a plain Gtk.Window parent
+        (exactly SynPadWindow's own class, unaffected by Task 5),
+        Adw.AlertDialog's own Escape/close handling closes the dialog
+        without ever emitting its 'closed' signal or invoking the
+        choose() callback at all. Under the nested-mainloop version this
+        was an unconditional freeze (loop.quit() would never run); now
+        that this method is plain async with no blocking wait, a callback
+        that simply never fires is inert — no delete happens, which is the
+        same safe outcome as an explicit False, just reached by
+        non-invocation rather than a call. `choose_finish()` is wrapped in
+        a try/except so an exception there can't propagate through
+        PyGObject's C-callback boundary and get silently swallowed with no
+        `callback` call at all. Decision logic (True only on 'Yes') is
+        unchanged. Every caller — in this module and in local_files.py's
+        `_on_local_delete` — was updated to this callback shape (Global
+        Constraint 5 lifted for local_files.py by the controller for this
+        fix)."""
         dlg = Adw.AlertDialog(
             heading="Confirm Delete",
             body=f"Are you sure you want to delete:\n\n{what}\n\nThis cannot be undone.",
@@ -659,34 +725,34 @@ class RemoteMixin:
         dlg.set_default_response('no')
         dlg.set_close_response('no')
 
-        loop = GLib.MainLoop()
-        result = {'confirmed': False}
-
         def on_response(dlg, res):
-            result['confirmed'] = (dlg.choose_finish(res) == 'yes')
-            loop.quit()
+            try:
+                response = dlg.choose_finish(res)
+            except Exception:
+                return
+            callback(response == 'yes')
 
         dlg.choose(self, None, on_response)
-        loop.run()
-        return result['confirmed']
 
     def _on_tree_new_file(self, parent_dir, parent_iter):
         """Create a new empty file in the given directory."""
-        name = self._ask_name("New File", "File name:")
-        if not name:
-            return
-        remote_path = f"{parent_dir.rstrip('/')}/{name}"
-        self._set_status(f"Creating {remote_path}...")
+        def on_name(name):
+            if not name:
+                return
+            remote_path = f"{parent_dir.rstrip('/')}/{name}"
+            self._set_status(f"Creating {remote_path}...")
 
-        def work():
-            try:
-                self.ftp_mgr.mkfile(remote_path)
-                GLib.idle_add(self._on_tree_file_created, parent_dir, parent_iter, remote_path)
-            except Exception as e:
-                GLib.idle_add(self._show_error, "Create Failed", str(e))
-                GLib.idle_add(self._set_status, "Create failed")
+            def work():
+                try:
+                    self.ftp_mgr.mkfile(remote_path)
+                    GLib.idle_add(self._on_tree_file_created, parent_dir, parent_iter, remote_path)
+                except Exception as e:
+                    GLib.idle_add(self._show_error, "Create Failed", str(e))
+                    GLib.idle_add(self._set_status, "Create failed")
 
-        threading.Thread(target=work, daemon=True).start()
+            threading.Thread(target=work, daemon=True).start()
+
+        self._ask_name("New File", "File name:", on_name)
 
     def _on_tree_file_created(self, parent_dir, parent_iter, remote_path):
         self._set_status(f"Created {remote_path}")
@@ -700,21 +766,23 @@ class RemoteMixin:
 
     def _on_tree_new_dir(self, parent_dir, parent_iter):
         """Create a new directory in the given directory."""
-        name = self._ask_name("New Directory", "Directory name:")
-        if not name:
-            return
-        remote_path = f"{parent_dir.rstrip('/')}/{name}"
-        self._set_status(f"Creating directory {remote_path}...")
+        def on_name(name):
+            if not name:
+                return
+            remote_path = f"{parent_dir.rstrip('/')}/{name}"
+            self._set_status(f"Creating directory {remote_path}...")
 
-        def work():
-            try:
-                self.ftp_mgr.mkdir(remote_path)
-                GLib.idle_add(self._on_tree_file_created, parent_dir, parent_iter, remote_path)
-            except Exception as e:
-                GLib.idle_add(self._show_error, "Create Failed", str(e))
-                GLib.idle_add(self._set_status, "Create failed")
+            def work():
+                try:
+                    self.ftp_mgr.mkdir(remote_path)
+                    GLib.idle_add(self._on_tree_file_created, parent_dir, parent_iter, remote_path)
+                except Exception as e:
+                    GLib.idle_add(self._show_error, "Create Failed", str(e))
+                    GLib.idle_add(self._set_status, "Create failed")
 
-        threading.Thread(target=work, daemon=True).start()
+            threading.Thread(target=work, daemon=True).start()
+
+        self._ask_name("New Directory", "Directory name:", on_name)
 
     def _on_tree_permissions(self, remote_path, name):
         """Show chmod/chown dialog for a file or directory."""
@@ -738,13 +806,14 @@ class RemoteMixin:
         octal entry), so per the migration plan's dialog shape it becomes
         a plain Gtk.Window with explicit buttons rather than
         Adw.AlertDialog — same structure as local_files.py's
-        `_show_local_permissions_dialog`. Unlike `_ask_name`/
-        `_confirm_delete`, nothing reads a return value from this method
-        (it's invoked via GLib.idle_add), so it converts straight to the
-        async button-callback pattern with no mainloop shim needed.
-        `.run()`'s blocking return-value branch becomes the `on_response`
-        callback below; the decision logic (validate octal, apply, report)
-        is unchanged."""
+        `_show_local_permissions_dialog`. Nothing reads a return value
+        from this method (it's invoked via GLib.idle_add), so it converts
+        straight to the async button-callback pattern. `.run()`'s blocking
+        return-value branch becomes the `on_response` callback below; the
+        decision logic (validate octal, apply, report) is unchanged.
+        `on_response` also fires from 'close-request' (titlebar close/
+        Alt-F4/destroyed transient parent), guarded so it can't run twice
+        for one dialog."""
         self._set_status(f"Permissions: {name}")
 
         win = Gtk.Window(
@@ -826,7 +895,14 @@ class RemoteMixin:
         octal_entry.connect('changed', update_checks)
 
         # --- Buttons ---
+        resolved = [False]
+
         def on_response(accepted):
+            # Guards against double-invocation: win.close() below raises
+            # 'close-request', whose handler also calls on_response().
+            if resolved[0]:
+                return
+            resolved[0] = True
             if accepted:
                 try:
                     new_mode = int(octal_entry.get_text().strip(), 8)
@@ -870,6 +946,19 @@ class RemoteMixin:
         key_ctrl.connect('key-pressed', on_key)
         win.add_controller(key_ctrl)
 
+        # Closing via the titlebar's own close control, Alt-F4, or the
+        # transient parent being destroyed all raise 'close-request'
+        # without going through Cancel/Apply/Escape — resolve as
+        # cancelled (no chmod), and let the default handling actually
+        # tear the window down (return False) rather than calling
+        # win.close() ourselves from inside its own close-request
+        # handling.
+        def on_close_request(_win):
+            on_response(False)
+            return False
+
+        win.connect('close-request', on_close_request)
+
         win.present()
 
     def _apply_permissions(self, remote_path, name, new_mode):
@@ -891,24 +980,26 @@ class RemoteMixin:
 
     def _on_tree_rename(self, remote_path, old_name, tree_iter):
         """Rename a file or directory on the server."""
-        new_name = self._ask_name("Rename", f"New name for '{old_name}':",
-                                          default_value=old_name, ok_label="Rename")
-        if not new_name or new_name == old_name:
-            return
-        parent_dir = os.path.dirname(remote_path)
-        new_path = f"{parent_dir.rstrip('/')}/{new_name}"
-        self._set_status(f"Renaming {old_name} to {new_name}...")
+        def on_name(new_name):
+            if not new_name or new_name == old_name:
+                return
+            parent_dir = os.path.dirname(remote_path)
+            new_path = f"{parent_dir.rstrip('/')}/{new_name}"
+            self._set_status(f"Renaming {old_name} to {new_name}...")
 
-        def work():
-            try:
-                self.ftp_mgr.rename(remote_path, new_path)
-                GLib.idle_add(self._on_tree_renamed, tree_iter,
-                              remote_path, new_path, new_name)
-            except Exception as e:
-                GLib.idle_add(self._show_error, "Rename Failed", str(e))
-                GLib.idle_add(self._set_status, "Rename failed")
+            def work():
+                try:
+                    self.ftp_mgr.rename(remote_path, new_path)
+                    GLib.idle_add(self._on_tree_renamed, tree_iter,
+                                  remote_path, new_path, new_name)
+                except Exception as e:
+                    GLib.idle_add(self._show_error, "Rename Failed", str(e))
+                    GLib.idle_add(self._set_status, "Rename failed")
 
-        threading.Thread(target=work, daemon=True).start()
+            threading.Thread(target=work, daemon=True).start()
+
+        self._ask_name("Rename", f"New name for '{old_name}':", on_name,
+                       default_value=old_name, ok_label="Rename")
 
     def _on_tree_renamed(self, tree_iter, old_path, new_path, new_name):
         """Update the tree and any open tabs after a rename."""
@@ -931,36 +1022,42 @@ class RemoteMixin:
 
     def _on_tree_delete_file(self, remote_path, tree_iter):
         """Delete a file from the server."""
-        if not self._confirm_delete(remote_path):
-            return
-        self._set_status(f"Deleting {remote_path}...")
+        def on_confirmed(confirmed):
+            if not confirmed:
+                return
+            self._set_status(f"Deleting {remote_path}...")
 
-        def work():
-            try:
-                self.ftp_mgr.rmfile(remote_path)
-                GLib.idle_add(self._on_tree_item_deleted, tree_iter, remote_path)
-            except Exception as e:
-                GLib.idle_add(self._show_error, "Delete Failed", str(e))
-                GLib.idle_add(self._set_status, "Delete failed")
+            def work():
+                try:
+                    self.ftp_mgr.rmfile(remote_path)
+                    GLib.idle_add(self._on_tree_item_deleted, tree_iter, remote_path)
+                except Exception as e:
+                    GLib.idle_add(self._show_error, "Delete Failed", str(e))
+                    GLib.idle_add(self._set_status, "Delete failed")
 
-        threading.Thread(target=work, daemon=True).start()
+            threading.Thread(target=work, daemon=True).start()
+
+        self._confirm_delete(remote_path, on_confirmed)
 
     def _on_tree_delete_dir(self, remote_path, tree_iter):
         """Delete a directory from the server."""
-        if not self._confirm_delete(remote_path):
-            return
-        self._set_status(f"Deleting directory {remote_path}...")
+        def on_confirmed(confirmed):
+            if not confirmed:
+                return
+            self._set_status(f"Deleting directory {remote_path}...")
 
-        def work():
-            try:
-                self.ftp_mgr.rmdir(remote_path)
-                GLib.idle_add(self._on_tree_item_deleted, tree_iter, remote_path)
-            except Exception as e:
-                GLib.idle_add(self._show_error, "Delete Failed",
-                              f"{str(e)}\n\nNote: directory must be empty to delete.")
-                GLib.idle_add(self._set_status, "Delete failed")
+            def work():
+                try:
+                    self.ftp_mgr.rmdir(remote_path)
+                    GLib.idle_add(self._on_tree_item_deleted, tree_iter, remote_path)
+                except Exception as e:
+                    GLib.idle_add(self._show_error, "Delete Failed",
+                                  f"{str(e)}\n\nNote: directory must be empty to delete.")
+                    GLib.idle_add(self._set_status, "Delete failed")
 
-        threading.Thread(target=work, daemon=True).start()
+            threading.Thread(target=work, daemon=True).start()
+
+        self._confirm_delete(remote_path, on_confirmed)
 
     def _on_tree_item_deleted(self, tree_iter, remote_path):
         """Remove the deleted item from the tree."""

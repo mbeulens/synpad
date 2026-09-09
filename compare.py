@@ -93,7 +93,14 @@ class CompareMixin:
 
         box.append(grid)
 
+        resolved = [False]
+
         def on_response(accepted):
+            # Guards against double-invocation: win.close() below raises
+            # 'close-request', whose handler also calls on_response().
+            if resolved[0]:
+                return
+            resolved[0] = True
             if accepted:
                 id_a = combo_a.get_active_id()
                 id_b = combo_b.get_active_id()
@@ -138,6 +145,18 @@ class CompareMixin:
         key_ctrl = Gtk.EventControllerKey()
         key_ctrl.connect('key-pressed', on_key)
         win.add_controller(key_ctrl)
+
+        # Closing via the titlebar's own close control, Alt-F4, or the
+        # transient parent being destroyed all raise 'close-request'
+        # without going through Cancel/Compare/Escape — resolve as
+        # cancelled, and let the default handling actually tear the
+        # window down (return False) rather than calling win.close()
+        # ourselves from inside its own close-request handling.
+        def on_close_request(_win):
+            on_response(False)
+            return False
+
+        win.connect('close-request', on_close_request)
 
         win.present()
 

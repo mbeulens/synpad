@@ -233,6 +233,25 @@ press_escape(win4)
 check("Escape does not call _show_diff", h.diff_calls == [], h.diff_calls)
 check("Escape closes the window", win4.get_visible() is False)
 
+# --- Closing via the titlebar/Alt-F4/destroyed-transient-parent path ---
+# (fix-round review, Important 5): a bare Gtk.Window's 'close-request'
+# fires on win.close() without going through Cancel/Compare/Escape at
+# all — verified separately that win.close() raises the same
+# 'close-request' signal a real titlebar click does. This is the
+# specific path a nested GLib.MainLoop-based dialog would have frozen
+# on (no default close-request handler existed), so it gets its own
+# dedicated check rather than being assumed covered by the Escape test.
+win5 = capture_window(lambda: h._on_compare_tabs())
+h.diff_calls.clear()
+win5.close()
+check("closing the window (titlebar/Alt-F4 path) does not call _show_diff",
+      h.diff_calls == [], h.diff_calls)
+check("closing the window actually closes it", win5.get_visible() is False)
+# A second close() (as a real second Alt-F4 might do) must not double-fire.
+win5.close()
+check("closing twice does not call _show_diff a second time",
+      h.diff_calls == [], h.diff_calls)
+
 
 # =====================================================================
 # _show_diff — plain Gtk.Window (was already Gtk.Window in GTK3, so no

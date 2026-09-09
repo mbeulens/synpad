@@ -3,22 +3,27 @@
 Guards:
 - `_on_connect` reusing `connection.ConnectDialog.choose()` per the Task 2
   async dialog API (no second dialog pattern invented).
-- `_ask_name` / `_confirm_delete`: these are called *synchronously* (for a
-  blocking return value) not only by this module's own tree handlers but
-  also by the already-ported local_files.py, which this task may not
-  modify — GTK4 has no synchronous dialog API at all, so both methods keep
-  their old synchronous signature via a private GLib.MainLoop pumped until
-  the dialog resolves. This file drives the *real* dialog widgets (not a
-  fake) through that mainloop, by scheduling the simulated click/keypress
-  with GLib.idle_add at window/dialog-construction time — since a bare
-  GLib.MainLoop() iterates the same default main context idle_add attaches
-  to, the scheduled action fires once the nested loop starts pumping.
-- `_show_permissions_dialog`: no caller reads a return value, so this
-  converts straight to the async button-callback pattern (Shape B) with no
-  mainloop shim — mirrors local_files.py's `_show_local_permissions_dialog`.
+- `_ask_name` / `_confirm_delete`: async, callback-based (`callback(name)` /
+  `callback(confirmed)`), called not only by this module's own tree
+  handlers but also by `local_files.py`'s four call sites (Global
+  Constraint 5 was lifted for those by the controller during review — see
+  the "Fix round 1" section of task-3-report.md). An earlier version kept
+  the old synchronous return-value contract via a private GLib.MainLoop;
+  that was reverted because it had three independent non-termination
+  paths (no `close-request` handler on a bare Gtk.Window; Adw.AlertDialog
+  never invoking its `choose()` callback at all when closed on a plain
+  Gtk.Window parent; `loop.quit()` not being in a `finally`). This file
+  drives the *real* dialog/window widgets end to end for every resolution
+  path, including closing via `win.close()` (the titlebar/Alt-F4/
+  destroyed-transient-parent path) — not just Cancel/OK/Escape.
+- `_show_permissions_dialog`: no caller reads a return value, so this is
+  plain async Shape B (mirrors local_files.py's
+  `_show_local_permissions_dialog`) — also drives its close-request path.
 - The tree right-click context menu and the quick-connect menu's
   Gtk.Menu/Gtk.MenuItem -> Gio.Menu + Gtk.PopoverMenu / Gio.SimpleAction
-  migration, preserving every item and label.
+  migration, preserving every item and label. Also guards that two
+  differently-named server groups never collide onto the same action name
+  (Minor 7 from the fix-round review).
 
 Never touches the real ~/.config/synpad/config.json or the OS keyring —
 save_config and secrets_store are monkeypatched at module level before any
@@ -92,51 +97,24 @@ def press_escape(win):
         kc.emit('key-pressed', Gdk.KEY_Escape, 0, 0)
 
 
-def run_with_scheduled_action(fn, action_fn):
-    """Call fn() (expected to build exactly one Gtk.Window via the shared
-    module-level Gtk.Window constructor and then block in a nested
-    GLib.MainLoop), scheduling action_fn(window) via GLib.idle_add at
-    window-construction time. A bare GLib.MainLoop() iterates the same
-    default main context idle_add attaches to, so the scheduled action
-    fires once the nested loop inside fn() starts pumping, and fn() then
-    returns normally once the action resolves the dialog — this drives the
-    real synchronous-return mainloop shim end to end, not just its
-    construction."""
+def capture_window(build_fn):
+    """Capture the Gtk.Window a mixin method builds, by temporarily
+    subclassing Gtk.Window at the shared gi.repository module level —
+    remote.py's `Gtk` name is that same module object. Since _ask_name and
+    _show_permissions_dialog are plain async (no blocking loop), build_fn()
+    returns immediately once the window is constructed and shown."""
     captured = []
     class _CapturingWindow(Gtk.Window):
         def __init__(self, *a, **kw):
             super().__init__(*a, **kw)
             captured.append(self)
-            GLib.idle_add(lambda: (action_fn(self), False)[1])
     _Real = Gtk.Window
     Gtk.Window = _CapturingWindow
     try:
-        result = fn()
+        build_fn()
     finally:
         Gtk.Window = _Real
-    return result, (captured[0] if captured else None)
-
-
-def run_confirm_with_response(fn, response):
-    """Same idea as run_with_scheduled_action, but for _confirm_delete's
-    Adw.AlertDialog: fakes Adw.AlertDialog.choose() to schedule the
-    callback via GLib.idle_add (queued before the nested loop.run() call,
-    so it fires once that loop starts pumping) instead of calling it
-    synchronously in-line, so the mainloop-shim is genuinely exercised."""
-    captured = {}
-    class _Result:
-        pass
-    def fake_choose(self, parent_win, cancellable, callback):
-        captured['dlg'] = self
-        self.choose_finish = lambda res: response
-        GLib.idle_add(lambda: (callback(self, _Result()), False)[1])
-    _orig = Adw.AlertDialog.choose
-    Adw.AlertDialog.choose = fake_choose
-    try:
-        result = fn()
-    finally:
-        Adw.AlertDialog.choose = _orig
-    return result, captured.get('dlg')
+    return captured[0] if captured else None
 
 
 class FakeWidget:
@@ -167,7 +145,12 @@ class FakeFtpMgr:
 
 class Host(RemoteMixin, Gtk.Window):
     """A real Gtk.Window subclass — every dialog/window here uses
-    `transient_for=self`, so the host must be an actual window."""
+    `transient_for=self`, so the host must be an actual window. This is
+    also the exact class shape SynPadWindow has in production: a plain
+    Gtk.Window (via Gtk.ApplicationWindow), never an Adw.Window, which is
+    precisely the condition the fix-round review's Critical 2 finding
+    (Adw.AlertDialog's callback silently never firing on Escape/close) is
+    about."""
     def __init__(self):
         Gtk.Window.__init__(self)
         self.config = {}
@@ -262,6 +245,26 @@ def action_names(menu_model, prefix):
     return names
 
 
+def action_targets(menu_model, prefix):
+    """Map action name -> label, for every leaf item under `prefix`,
+    recursing through sections and submenus."""
+    result = {}
+    for i in range(menu_model.get_n_items()):
+        sec = menu_model.get_item_link(i, Gio.MENU_LINK_SECTION)
+        sub = menu_model.get_item_link(i, Gio.MENU_LINK_SUBMENU)
+        if sec is not None:
+            result.update(action_targets(sec, prefix))
+        elif sub is not None:
+            result.update(action_targets(sub, prefix))
+        else:
+            act = menu_model.get_item_attribute_value(i, 'action', None)
+            lbl = menu_model.get_item_attribute_value(i, 'label', None)
+            s = act.get_string() if act else None
+            if s and s.startswith(prefix):
+                result[s[len(prefix):]] = lbl.get_string() if lbl else None
+    return result
+
+
 # No servers: quick_btn is hidden.
 h.config['servers'] = []
 h._rebuild_quick_menu()
@@ -317,6 +320,27 @@ h.config['servers'] = [{'guid': 'g1', 'name': 'Solo', 'protocol': 'sftp', 'group
 h._rebuild_quick_menu()
 check("only-grouped: submenu present with the one server",
       submenu_labels(h.quick_btn.get_menu_model()).get('X') == ['Solo (SFTP)'])
+
+# Fix-round Minor 7: two groups that sanitise to the same string ("A B"
+# and "A-B" both -> "A_B" under the old ''.join(isalnum-or-'_') scheme)
+# must NOT collide onto the same action name — each server's action must
+# still resolve to its own guid.
+h.config['servers'] = [
+    {'guid': 'ga', 'name': 'ServerA', 'protocol': 'sftp', 'group': 'A B'},
+    {'guid': 'gb', 'name': 'ServerB', 'protocol': 'sftp', 'group': 'A-B'},
+]
+h._rebuild_quick_menu()
+model = h.quick_btn.get_menu_model()
+targets = action_targets(model, 'quickconn.')
+check("colliding-sanitised group names produce distinct actions",
+      len(set(targets.keys())) == len(targets), targets)
+h.do_connect_calls.clear()
+for action_name, label in targets.items():
+    expected_guid = 'ga' if label == 'ServerA (SFTP)' else 'gb'
+    h.quick_btn.activate_action(f'quickconn.{action_name}', None)
+    check(f"action for {label!r} connects to its own guid ({expected_guid})",
+          h.do_connect_calls and h.do_connect_calls[-1].get('server_guid') == expected_guid,
+          h.do_connect_calls)
 
 
 # =====================================================================
@@ -380,8 +404,8 @@ check("dir menu: no git-history item (not SFTP / not .git)",
 names = action_names(menu, 'remotectx.')
 delete_action = [n for n in names if 'delete' in n]
 check("dir menu wires a delete action (invocation covered via Host3 below "
-      "— _on_tree_delete_dir calls the real _confirm_delete, which would "
-      "otherwise block this test on its own nested mainloop)",
+      "— _on_tree_delete_dir calls the real _confirm_delete, which now "
+      "just presents a real Adw.AlertDialog rather than blocking)",
       bool(delete_action), names)
 
 # Directory named '.git' AND ftp_mgr is SFTPManager -> git-history item.
@@ -480,95 +504,205 @@ finally:
 
 
 # =====================================================================
-# _ask_name — synchronous return preserved via a private GLib.MainLoop
+# _ask_name — async callback API (no nested GLib.MainLoop). Every
+# resolution path is driven against the real Gtk.Window: Cancel, OK,
+# Enter-in-entry, blank entry, Escape, AND win.close() (the titlebar/
+# Alt-F4/destroyed-transient-parent path — Critical 1 from the fix-round
+# review: a bare Gtk.Window has no default close-request handler, so this
+# path is not exercised by an Escape-only test).
 # =====================================================================
 
 h2 = Host()
 
-result, win = run_with_scheduled_action(
-    lambda: h2._ask_name("New File", "File name:"),
-    lambda w: click_button(w, "Cancel"))
-check("_ask_name does not block forever (Cancel path returned)", True)
-check("_ask_name Cancel returns None", result is None, result)
+received = []
+win = capture_window(lambda: h2._ask_name("New File", "File name:",
+                                           lambda name: received.append(name)))
+check("_ask_name returns immediately (no blocking mainloop)", win is not None)
 check("_ask_name window title", win.get_title() == "New File", win.get_title())
-check("_ask_name window closes on Cancel", win.get_visible() is False)
+click_button(win, "Cancel")
+check("_ask_name Cancel calls back with None", received == [None], received)
+check("_ask_name Cancel closes the window", win.get_visible() is False)
+# A second resolution attempt after Cancel must not fire the callback again.
+press_escape(win)
+check("_ask_name callback fires exactly once (Escape after Cancel is a no-op)",
+      received == [None], received)
+
 
 def set_entry_and_click(win, text, label):
     find_all(win, Gtk.Entry)[0].set_text(text)
     click_button(win, label)
 
-result, win = run_with_scheduled_action(
-    lambda: h2._ask_name("New File", "File name:"),
-    lambda w: set_entry_and_click(w, "hello.txt", "Create"))
-check("_ask_name Create with text returns the name", result == "hello.txt", result)
+
+received = []
+win = capture_window(lambda: h2._ask_name("New File", "File name:",
+                                           lambda name: received.append(name)))
+set_entry_and_click(win, "hello.txt", "Create")
+check("_ask_name Create with text calls back with the name",
+      received == ["hello.txt"], received)
 check("_ask_name Create closes the window", win.get_visible() is False)
 
-result, win = run_with_scheduled_action(
-    lambda: h2._ask_name("New File", "File name:"),
-    lambda w: set_entry_and_click(w, "   ", "Create"))
-check("_ask_name Create with blank/whitespace text returns None", result is None, result)
+received = []
+win = capture_window(lambda: h2._ask_name("New File", "File name:",
+                                           lambda name: received.append(name)))
+set_entry_and_click(win, "   ", "Create")
+check("_ask_name Create with blank/whitespace text calls back with None",
+      received == [None], received)
 
-result, win = run_with_scheduled_action(
-    lambda: h2._ask_name("Rename", "New name for 'old.txt':",
-                          default_value='old.txt', ok_label='Rename'),
-    lambda w: click_button(w, "Rename"))
-check("_ask_name pre-fills default_value and Rename returns it unchanged",
-      result == 'old.txt', result)
+received = []
+win = capture_window(lambda: h2._ask_name(
+    "Rename", "New name for 'old.txt':", lambda name: received.append(name),
+    default_value='old.txt', ok_label='Rename'))
+click_button(win, "Rename")
+check("_ask_name pre-fills default_value and Rename calls back with it unchanged",
+      received == ['old.txt'], received)
+
 
 def press_enter(win, text):
     entry = find_all(win, Gtk.Entry)[0]
     entry.set_text(text)
     entry.emit('activate')
 
-result, win = run_with_scheduled_action(
-    lambda: h2._ask_name("New File", "File name:"),
-    lambda w: press_enter(w, 'enter.txt'))
-check("_ask_name Enter-in-entry submits like the OK button", result == 'enter.txt', result)
 
-result, win = run_with_scheduled_action(
-    lambda: h2._ask_name("New File", "File name:"),
-    lambda w: press_escape(w))
-check("_ask_name Escape returns None (was RESPONSE_DELETE_EVENT)", result is None, result)
+received = []
+win = capture_window(lambda: h2._ask_name("New File", "File name:",
+                                           lambda name: received.append(name)))
+press_enter(win, 'enter.txt')
+check("_ask_name Enter-in-entry submits like the OK button",
+      received == ['enter.txt'], received)
+
+received = []
+win = capture_window(lambda: h2._ask_name("New File", "File name:",
+                                           lambda name: received.append(name)))
+press_escape(win)
+check("_ask_name Escape calls back with None (was RESPONSE_DELETE_EVENT)",
+      received == [None], received)
 check("_ask_name Escape closes the window", win.get_visible() is False)
 
-result, win = run_with_scheduled_action(
-    lambda: h2._ask_name("New File", "File name:", ok_label="Create"),
-    lambda w: click_button(w, "Cancel"))
+# Critical 1 (fix-round review): closing the window itself — the titlebar
+# close control, Alt-F4, or a destroyed transient parent all raise
+# 'close-request', which a bare Gtk.Window has NO default handler for.
+# Simulate it with win.close() (verified separately to raise the same
+# 'close-request' signal a real titlebar click does).
+received = []
+win = capture_window(lambda: h2._ask_name("New File", "File name:",
+                                           lambda name: received.append(name)))
+win.close()
+check("closing the window (titlebar/Alt-F4 path) calls back with None",
+      received == [None], received)
+check("closing the window actually closes it", win.get_visible() is False)
+# Calling close() again (as a real second Alt-F4 on an already-closing
+# window might) must not fire the callback a second time.
+win.close()
+check("_ask_name callback fires exactly once even if close() is called twice",
+      received == [None], received)
+
+received = []
+win = capture_window(lambda: h2._ask_name("New File", "File name:", ok_label="Create",
+                                           callback=lambda name: received.append(name)))
 labels = [b.get_label() for b in labeled_buttons(win)]
 check("_ask_name button visual order is [Create, Cancel] (matches old pack_end reversal)",
       labels == ["Create", "Cancel"], labels)
+click_button(win, "Cancel")
 
 
 # =====================================================================
-# _confirm_delete — synchronous bool return preserved via a private
-# GLib.MainLoop wrapping Adw.AlertDialog's async choose()
+# _confirm_delete — async callback API (no nested GLib.MainLoop). Fakes
+# Adw.AlertDialog.choose() for the Yes/No happy-path field checks (the
+# same technique Task 2 established for connection.py's own
+# _on_delete_server, and still valid now that nothing here blocks waiting
+# for it) — but ALSO drives the REAL Adw.AlertDialog.close() (Critical 2
+# from the fix-round review) with no monkeypatching of choose() at all, to
+# verify what actually happens on this stack when a plain Gtk.Window
+# parent (exactly what Host/SynPadWindow is) closes the dialog outside a
+# response button.
 # =====================================================================
 
-result, dlg = run_confirm_with_response(
-    lambda: h2._confirm_delete('/remote/secret.txt'), 'yes')
-check("_confirm_delete does not block forever (resolved via mainloop shim)", True)
-check("_confirm_delete returns True on 'Yes'", result is True, result)
-check("heading preserved", dlg.get_heading() == "Confirm Delete", dlg.get_heading())
-check("body names the path",
-      dlg.get_body() == "Are you sure you want to delete:\n\n/remote/secret.txt"
-                         "\n\nThis cannot be undone.", dlg.get_body())
-check("close_response is 'no' (Escape must not delete)",
-      dlg.get_close_response() == 'no', dlg.get_close_response())
-check("default_response is 'no' (safe default)",
-      dlg.get_default_response() == 'no', dlg.get_default_response())
-check("'yes' response is styled destructive",
-      dlg.get_response_appearance('yes') == Adw.ResponseAppearance.DESTRUCTIVE)
+received = []
+captured_dlg = {}
+def fake_choose(self, parent_win, cancellable, callback):
+    captured_dlg['dlg'] = self
+    self.choose_finish = lambda res: 'yes'
+    captured_dlg['fire'] = lambda: callback(self, object())
+_orig_choose = Adw.AlertDialog.choose
+Adw.AlertDialog.choose = fake_choose
+try:
+    h2._confirm_delete('/remote/secret.txt', lambda confirmed: received.append(confirmed))
+    check("_confirm_delete returns immediately (no blocking mainloop)", received == [])
+    dlg = captured_dlg['dlg']
+    check("heading preserved", dlg.get_heading() == "Confirm Delete", dlg.get_heading())
+    check("body names the path",
+          dlg.get_body() == "Are you sure you want to delete:\n\n/remote/secret.txt"
+                             "\n\nThis cannot be undone.", dlg.get_body())
+    check("close_response is 'no' (Escape must not delete)",
+          dlg.get_close_response() == 'no', dlg.get_close_response())
+    check("default_response is 'no' (safe default)",
+          dlg.get_default_response() == 'no', dlg.get_default_response())
+    check("'yes' response is styled destructive",
+          dlg.get_response_appearance('yes') == Adw.ResponseAppearance.DESTRUCTIVE)
+    captured_dlg['fire']()
+    check("'Yes' calls back with True", received == [True], received)
 
-result, dlg = run_confirm_with_response(
-    lambda: h2._confirm_delete('/remote/secret.txt'), 'no')
-check("_confirm_delete returns False on 'No'", result is False, result)
+    received.clear()
+    captured_dlg.clear()
+    h2._confirm_delete('/remote/secret.txt', lambda confirmed: received.append(confirmed))
+    captured_dlg['dlg'].choose_finish = lambda res: 'no'
+    captured_dlg['fire']()
+    check("'No' calls back with False", received == [False], received)
+
+    # Critical 3 (fix-round review): choose_finish() raising must not
+    # propagate through the callback boundary uncaught.
+    received.clear()
+    captured_dlg.clear()
+    h2._confirm_delete('/remote/secret.txt', lambda confirmed: received.append(confirmed))
+    def raise_finish(res):
+        raise RuntimeError("boom")
+    captured_dlg['dlg'].choose_finish = raise_finish
+    try:
+        captured_dlg['fire']()
+        raised = False
+    except Exception:
+        raised = True
+    check("choose_finish() raising is caught, not propagated", not raised)
+    check("choose_finish() raising does not call back at all", received == [], received)
+finally:
+    Adw.AlertDialog.choose = _orig_choose
+
+# Important 4 (fix-round review): the fakes above never exercise the real
+# close/Escape path, which is the one that actually behaves unexpectedly
+# on this stack. Drive the REAL Adw.AlertDialog — only its __init__ is
+# intercepted, to get a handle on the instance; choose()/close() below are
+# the genuine libadwaita implementation, not a fake.
+captured_alerts = []
+class _CapturingAlertDialog(Adw.AlertDialog):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        captured_alerts.append(self)
+
+_orig_Alert = remote.Adw.AlertDialog
+remote.Adw.AlertDialog = _CapturingAlertDialog
+try:
+    received.clear()
+    h2._confirm_delete('/remote/real.txt', lambda confirmed: received.append(confirmed))
+finally:
+    remote.Adw.AlertDialog = _orig_Alert
+check("real Adw.AlertDialog constructed", len(captured_alerts) == 1, captured_alerts)
+real_dlg = captured_alerts[0]
+real_dlg.close()
+check("closing the real dialog (Escape/close path) does not raise", True)
+check("on this stack (plain Gtk.Window parent), closing the real dialog "
+      "never invokes the choose() callback at all — verified independently "
+      "of any SynPad code; this used to be an unconditional freeze under "
+      "the old nested-mainloop version (loop.quit() would never run), and "
+      "is now simply inert (no delete happens, matching the safe 'No' "
+      "outcome) since _confirm_delete no longer blocks waiting for it",
+      received == [], received)
 
 
 # =====================================================================
 # _on_tree_new_file / _on_tree_new_dir / _on_tree_rename /
-# _on_tree_delete_file / _on_tree_delete_dir — unchanged call-through into
-# the now-async-shimmed _ask_name / _confirm_delete (stubbed here, since
-# their own real behavior is covered above and by local_files.py's
+# _on_tree_delete_file / _on_tree_delete_dir — unchanged call-through
+# logic into the now-callback-based _ask_name / _confirm_delete (stubbed
+# here with the new callback signature, matching local_files.py's own
 # established stubbing convention for these same two shared helpers).
 # =====================================================================
 
@@ -598,8 +732,10 @@ class Host3(RemoteMixin, Gtk.Window):
     def _set_status(self, m): self.status.append(m)
     def _show_error(self, title, msg): self.errors.append((title, msg))
     def _console_log(self, msg, tag=None): self.console.append((msg, tag))
-    def _ask_name(self, *a, **kw): return self.ask_name_return
-    def _confirm_delete(self, what): return self.confirm_return
+    def _ask_name(self, title, prompt, callback, default_value='', ok_label='Create'):
+        callback(self.ask_name_return)
+    def _confirm_delete(self, what, callback):
+        callback(self.confirm_return)
     def _on_tree_file_created(self, *a, **kw): self.console.append(('created', a))
     def _on_tree_renamed(self, *a, **kw): self.console.append(('renamed', a))
     def _on_tree_item_deleted(self, *a, **kw): self.console.append(('deleted', a))
@@ -614,7 +750,7 @@ class SyncThread:
 remote.threading.Thread = SyncThread
 remote.GLib.idle_add = lambda fn, *a: fn(*a)
 try:
-    # New File: ask_name returns None -> no-op.
+    # New File: ask_name calls back with None -> no-op.
     h3.ask_name_return = None
     h3._on_tree_new_file('/remote/dir', None)
     check("New File with no name is a no-op", h3.mkfile_calls == [], h3.mkfile_calls)
@@ -658,8 +794,10 @@ finally:
 
 
 # =====================================================================
-# _show_permissions_dialog — async Shape B, no synchronous-return shim
-# needed (no caller reads a return value)
+# _show_permissions_dialog — async Shape B, plus its close-request path
+# (Important 5 from the fix-round review: every converted
+# Gtk.Dialog->Gtk.Window in this task needs a close-by-titlebar test, not
+# just Escape).
 # =====================================================================
 
 h4 = Host()
@@ -667,20 +805,9 @@ h4.ftp_mgr = FakeFtpMgr(connected=True)
 chmod_calls = []
 h4.ftp_mgr.chmod = lambda path, mode: chmod_calls.append((path, mode))
 
-captured = []
-class _CapturingWindow(Gtk.Window):
-    def __init__(self, *a, **kw):
-        super().__init__(*a, **kw)
-        captured.append(self)
-_RealWindow = Gtk.Window
-Gtk.Window = _CapturingWindow
-try:
-    h4._show_permissions_dialog('/remote/file.txt', 'file.txt', 0o644, 'u', 'g')
-finally:
-    Gtk.Window = _RealWindow
-
-check("permissions dialog window created", len(captured) == 1, captured)
-win = captured[0]
+win = capture_window(lambda: h4._show_permissions_dialog(
+    '/remote/file.txt', 'file.txt', 0o644, 'u', 'g'))
+check("permissions dialog window created", win is not None)
 check("dialog title includes the file name", win.get_title() == "Permissions — file.txt",
       win.get_title())
 
@@ -715,13 +842,8 @@ by_label["Cancel"].emit('clicked')
 check("Cancel does not call chmod", chmod_calls == [], chmod_calls)
 check("Cancel closes the window", win.get_visible() is False)
 
-captured.clear()
-Gtk.Window = _CapturingWindow
-try:
-    h4._show_permissions_dialog('/remote/file.txt', 'file.txt', 0o644, 'u', 'g')
-finally:
-    Gtk.Window = _RealWindow
-win2 = captured[0]
+win2 = capture_window(lambda: h4._show_permissions_dialog(
+    '/remote/file.txt', 'file.txt', 0o644, 'u', 'g'))
 by_label2 = {b.get_label(): b for b in labeled_buttons(win2)}
 # _apply_permissions runs chmod in a background thread and reports status
 # via GLib.idle_add — fake both so the synchronous test can observe the
@@ -744,13 +866,8 @@ check("Apply reports status", h4.status and 'Permissions set' in h4.status[-1], 
 
 # Invalid octal reports an error and still closes, without raising.
 h4.errors.clear()
-captured.clear()
-Gtk.Window = _CapturingWindow
-try:
-    h4._show_permissions_dialog('/remote/file.txt', 'file.txt', 0o644, 'u', 'g')
-finally:
-    Gtk.Window = _RealWindow
-win3 = captured[0]
+win3 = capture_window(lambda: h4._show_permissions_dialog(
+    '/remote/file.txt', 'file.txt', 0o644, 'u', 'g'))
 find_all(win3, Gtk.Entry)[0].set_text("not-octal")
 by_label3 = {b.get_label(): b for b in labeled_buttons(win3)}
 try:
@@ -763,13 +880,8 @@ check("invalid octal reports an error without raising",
 check("invalid octal still closes the window", win3.get_visible() is False)
 
 # Escape cancels without applying (was RESPONSE_DELETE_EVENT).
-captured.clear()
-Gtk.Window = _CapturingWindow
-try:
-    h4._show_permissions_dialog('/remote/file.txt', 'file.txt', 0o644, 'u', 'g')
-finally:
-    Gtk.Window = _RealWindow
-win4 = captured[0]
+win4 = capture_window(lambda: h4._show_permissions_dialog(
+    '/remote/file.txt', 'file.txt', 0o644, 'u', 'g'))
 key_ctrls = escape_key_controllers(win4)
 check("permissions dialog has at least one key controller (ours + GTK's own)",
       len(key_ctrls) >= 1, key_ctrls)
@@ -780,6 +892,23 @@ for kc in key_ctrls:
 check("Escape does not call chmod", chmod_calls == [], chmod_calls)
 check("Escape reports no status change", h4.status == [], h4.status)
 check("Escape closes the window", win4.get_visible() is False)
+
+# Critical 1 / Important 5 (fix-round review): closing via the titlebar/
+# Alt-F4/destroyed-transient-parent path (win.close()) must resolve as
+# cancelled too, not just Escape.
+chmod_calls.clear()
+win5 = capture_window(lambda: h4._show_permissions_dialog(
+    '/remote/file.txt', 'file.txt', 0o644, 'u', 'g'))
+# _show_permissions_dialog sets status ("Permissions: file.txt") as soon
+# as it's built, independent of how it's later resolved — clear after
+# construction so this only checks what closing itself does.
+h4.status.clear()
+win5.close()
+check("closing the permissions window (titlebar/Alt-F4 path) does not call chmod",
+      chmod_calls == [], chmod_calls)
+check("closing the permissions window reports no further status change",
+      h4.status == [], h4.status)
+check("closing the permissions window actually closes it", win5.get_visible() is False)
 
 
 shutil.rmtree(h.tmp_dir, ignore_errors=True)

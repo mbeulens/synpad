@@ -246,85 +246,113 @@ class LocalFilesMixin:
         return True
 
     def _on_local_new_file(self, parent_dir, parent_iter):
-        """Create a new empty local file."""
-        name = self._ask_name("New File", "File name:")
-        if not name:
-            return
-        filepath = os.path.join(parent_dir, name)
-        try:
-            with open(filepath, 'w') as f:
-                pass
-            self._set_status(f"Created {filepath}")
-            if parent_iter:
-                self._local_store[parent_iter][4] = False
-                self._load_local_tree(parent_dir, parent_iter)
-            else:
-                self._on_local_refresh(None)
-        except Exception as e:
-            self._show_error("Create Failed", str(e))
+        """Create a new empty local file.
+
+        GTK4: `_ask_name` (owned by remote.py's RemoteMixin, shared onto
+        this same `self` via SynPadWindow's mixins) is async — it calls
+        back instead of returning a value, since GTK4 has no synchronous
+        dialog API at all. See remote.py's `_ask_name` docstring for why
+        (a nested GLib.MainLoop was tried and reverted: it hung on
+        titlebar-close, which a bare Gtk.Window has no default handler
+        for). The body after the old `if not name: return` guard becomes
+        this callback's continuation, unchanged."""
+        def on_name(name):
+            if not name:
+                return
+            filepath = os.path.join(parent_dir, name)
+            try:
+                with open(filepath, 'w') as f:
+                    pass
+                self._set_status(f"Created {filepath}")
+                if parent_iter:
+                    self._local_store[parent_iter][4] = False
+                    self._load_local_tree(parent_dir, parent_iter)
+                else:
+                    self._on_local_refresh(None)
+            except Exception as e:
+                self._show_error("Create Failed", str(e))
+
+        self._ask_name("New File", "File name:", on_name)
 
     def _on_local_new_dir(self, parent_dir, parent_iter):
-        """Create a new local directory."""
-        name = self._ask_name("New Directory", "Directory name:")
-        if not name:
-            return
-        dirpath = os.path.join(parent_dir, name)
-        try:
-            os.makedirs(dirpath, exist_ok=True)
-            self._set_status(f"Created {dirpath}")
-            if parent_iter:
-                self._local_store[parent_iter][4] = False
-                self._load_local_tree(parent_dir, parent_iter)
-            else:
-                self._on_local_refresh(None)
-        except Exception as e:
-            self._show_error("Create Failed", str(e))
+        """Create a new local directory. See `_on_local_new_file` for why
+        `_ask_name` is now callback-based."""
+        def on_name(name):
+            if not name:
+                return
+            dirpath = os.path.join(parent_dir, name)
+            try:
+                os.makedirs(dirpath, exist_ok=True)
+                self._set_status(f"Created {dirpath}")
+                if parent_iter:
+                    self._local_store[parent_iter][4] = False
+                    self._load_local_tree(parent_dir, parent_iter)
+                else:
+                    self._on_local_refresh(None)
+            except Exception as e:
+                self._show_error("Create Failed", str(e))
+
+        self._ask_name("New Directory", "Directory name:", on_name)
 
     def _on_local_rename(self, local_path, old_name, tree_iter):
-        """Rename a local file or directory."""
-        new_name = self._ask_name("Rename", f"New name for '{old_name}':",
-                                          default_value=old_name, ok_label="Rename")
-        if not new_name or new_name == old_name:
-            return
-        parent_dir = os.path.dirname(local_path)
-        new_path = os.path.join(parent_dir, new_name)
-        try:
-            os.rename(local_path, new_path)
-            is_dir = self._local_store[tree_iter][3]
-            self._local_store[tree_iter][0] = new_name
-            self._local_store[tree_iter][2] = new_path
-            if not is_dir:
-                self._local_store[tree_iter][1] = self._icon_for_file(new_name)
-            # Update any open tab
-            for tab in self.tabs.values():
-                if tab.is_local and tab.local_path == local_path:
-                    tab.local_path = new_path
-                    tab.remote_path = new_path
-                    self._update_tab_label(tab, new_name)
-                    break
-            self._set_status(f"Renamed to {new_path}")
-        except Exception as e:
-            self._show_error("Rename Failed", str(e))
+        """Rename a local file or directory. See `_on_local_new_file` for
+        why `_ask_name` is now callback-based."""
+        def on_name(new_name):
+            if not new_name or new_name == old_name:
+                return
+            parent_dir = os.path.dirname(local_path)
+            new_path = os.path.join(parent_dir, new_name)
+            try:
+                os.rename(local_path, new_path)
+                is_dir = self._local_store[tree_iter][3]
+                self._local_store[tree_iter][0] = new_name
+                self._local_store[tree_iter][2] = new_path
+                if not is_dir:
+                    self._local_store[tree_iter][1] = self._icon_for_file(new_name)
+                # Update any open tab
+                for tab in self.tabs.values():
+                    if tab.is_local and tab.local_path == local_path:
+                        tab.local_path = new_path
+                        tab.remote_path = new_path
+                        self._update_tab_label(tab, new_name)
+                        break
+                self._set_status(f"Renamed to {new_path}")
+            except Exception as e:
+                self._show_error("Rename Failed", str(e))
+
+        self._ask_name("Rename", f"New name for '{old_name}':", on_name,
+                       default_value=old_name, ok_label="Rename")
 
     def _on_local_delete(self, local_path, name, tree_iter, is_dir=False):
-        """Delete a local file or directory with confirmation."""
-        if not self._confirm_delete(local_path):
-            return
-        try:
-            if is_dir:
-                import shutil
-                shutil.rmtree(local_path)
-            else:
-                os.unlink(local_path)
-            self._local_store.remove(tree_iter)
-            self._set_status(f"Deleted {local_path}")
-            # Close any open tab for this file
-            for page_num, tab in list(self.tabs.items()):
-                if tab.is_local and tab.local_path == local_path:
-                    self._close_tab(page_num)
-                    break
-        except Exception as e:
-            self._show_error("Delete Failed", str(e))
+        """Delete a local file or directory with confirmation.
+
+        GTK4: `_confirm_delete` (owned by remote.py's RemoteMixin, shared
+        onto this same `self`) is likewise now callback-based — see
+        remote.py's `_confirm_delete` docstring for why (on this
+        GTK/libadwaita stack, Adw.AlertDialog's own Escape/close handling
+        never invokes the choose() callback at all when its parent is a
+        plain Gtk.Window, exactly what SynPadWindow is; a nested
+        GLib.MainLoop waiting on that callback would hang forever)."""
+        def on_confirmed(confirmed):
+            if not confirmed:
+                return
+            try:
+                if is_dir:
+                    import shutil
+                    shutil.rmtree(local_path)
+                else:
+                    os.unlink(local_path)
+                self._local_store.remove(tree_iter)
+                self._set_status(f"Deleted {local_path}")
+                # Close any open tab for this file
+                for page_num, tab in list(self.tabs.items()):
+                    if tab.is_local and tab.local_path == local_path:
+                        self._close_tab(page_num)
+                        break
+            except Exception as e:
+                self._show_error("Delete Failed", str(e))
+
+        self._confirm_delete(local_path, on_confirmed)
 
     def _on_local_permissions(self, local_path, name):
         """Show chmod dialog for a local file or directory."""
